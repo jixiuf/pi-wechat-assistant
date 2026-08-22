@@ -174,6 +174,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     coordinatorTryLock?: (name: string, pid: number, capability?: string, force?: boolean) => boolean
     coordinatorReleaseLock?: (name: string, capability?: string) => void
     getInstanceName?: () => string
+    getCoordinatorUrl?: () => string | undefined
+    requestRemoteLock?: (
+      baseUrl: string, name: string, pid: number, capability?: string, force?: boolean,
+    ) => Promise<{ ok: boolean; holder?: { name?: string } | null }>
+    releaseRemoteLock?: (baseUrl: string, name: string, capability?: string) => Promise<void>
   }
 
   function getHubBridge(): HubBridge | null {
@@ -185,11 +190,28 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     return getHubBridge()?.getInstanceName?.() || currentInstanceName || 'local'
   }
 
+  /** 客户端模式：协调中心 URL 存在时锁走远程 HTTP（跨机唯一仲裁）；否则本地锁 */
+  function getCoordUrl(): string | undefined {
+    return getHubBridge()?.getCoordinatorUrl?.()
+  }
+
   async function lock(): Promise<{ success: boolean; message: string }> {
     const hub = getHubBridge()
+    const coordUrl = getCoordUrl()
+    const holderName = getLockHolderName()
+    if (coordUrl && hub?.requestRemoteLock) {
+      // 客户端 → 协调中心请求全局锁（服务器端唯一仲裁）
+      const res = await hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat')
+      if (res.ok) {
+        lockSessionId = getLockId()
+        return { success: true, message: '已获取全局锁' }
+      }
+      const holder = res.holder?.name
+      return { success: false, message: `微信已被其他实例接管 (${holder ?? '未知'})` }
+    }
     if (hub?.coordinatorTryLock) {
-      // hub 全局锁：capability=wechat，跨机唯一持有者
-      const ok = hub.coordinatorTryLock(getLockHolderName(), process.pid, 'wechat')
+      // 服务器模式：本地全局锁文件
+      const ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
       if (ok) {
         lockSessionId = getLockId()
         return { success: true, message: '已获取全局锁' }
@@ -204,8 +226,12 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   async function unlock(): Promise<void> {
     const hub = getHubBridge()
-    if (hub?.coordinatorReleaseLock) {
-      hub.coordinatorReleaseLock(getLockHolderName(), 'wechat')
+    const coordUrl = getCoordUrl()
+    const holderName = getLockHolderName()
+    if (coordUrl && hub?.releaseRemoteLock) {
+      await hub.releaseRemoteLock(coordUrl, holderName, 'wechat')
+    } else if (hub?.coordinatorReleaseLock) {
+      hub.coordinatorReleaseLock(holderName, 'wechat')
     }
     if (lockSessionId) await releaseLock(lockSessionId)
   }
@@ -326,10 +352,21 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     heartbeat: () => {
       // 轮询迭代中续约全局锁：持有者心跳失败（TTL 10s）后他机才能接管
       const hub = getHubBridge()
+      const coordUrl = getCoordUrl()
+      const holderName = getLockHolderName()
+      let ok = false
+      if (coordUrl && hub?.requestRemoteLock) {
+        void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then((res) => {
+          if (!res.ok) {
+            log(`全局锁已被其他实例接管，微信轮询让位`)
+            void stopBridge({ releaseLock: false })
+          }
+        }).catch(() => {})
+        return
+      }
       if (hub?.coordinatorTryLock) {
-        const ok = hub.coordinatorTryLock(getLockHolderName(), process.pid, 'wechat')
+        ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
         if (!ok) {
-          // 锁已被他机抢占（capability=wechat）：本机让位，停止轮询
           log(`全局锁已被其他实例接管，微信轮询让位`)
           void stopBridge({ releaseLock: false })
         }
