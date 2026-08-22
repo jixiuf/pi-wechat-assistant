@@ -2,7 +2,9 @@
 // pi-wechat-assistant — 微信作为 pi TUI 的移动端分身
 // ============================================================================
 
+import * as fs from 'node:fs'
 import { existsSync, statSync } from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { Type } from '@sinclair/typebox'
@@ -305,6 +307,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   async function handleIncomingMessage(message: IncomingMessage, activeClient: WeixinClient): Promise<void> {
     log(`收到消息: type=${message.type}, text=${message.text?.slice(0, 50)}, images=${message.imageUrls.length}`)
 
+    // 持久化最后一条微信文本消息（接管通知用，跨实例共享）
+    if (message.text && message.type === 'text') {
+      persistLastWechatMessage(message.userId, message.text)
+    }
+
     if (UNSUPPORTED_TYPES.has(message.type)) {
       const reply = UNSUPPORTED_REPLY[message.type] ?? UNSUPPORTED_REPLY['unknown']
       try {
@@ -492,17 +499,22 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     notify('微信桥接已启动 📱', 'info')
     updateStatusBar()
     void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
-    // 接管成功后通知微信用户（感知切换）+ 带上最后一条消息
-    void notifyWechatTakeover()
+    // 注意：不在这里通知微信用户。接管通知仅在明确的接管事件（onTakeoverRequest）触发，
+    // 避免降级接管/autoStart/heartbeat 多路径重复通知。
   }
 
   /**
    * 接管/启动成功后通知最后活跃的微信用户：告知已由本实例接管，并附最后一条消息。
    * 用户感知不到实例切换，需主动告知。
    */
+  // 接管通知防抖：同一实例 5s 内只通知一次（避免 heartbeat/接管分支竞态重复）
+  let lastTakeoverNotify = 0
   async function notifyWechatTakeover(): Promise<void> {
     try {
       if (!client || !running) return
+      const now = Date.now()
+      if (now - lastTakeoverNotify < 5000) return
+      lastTakeoverNotify = now
       const userId = client.lastActiveUserId ?? queue.lastWechatUser?.userId
       if (!userId) return
       const instanceLabel = currentInstanceName || 'local'
@@ -517,28 +529,25 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     }
   }
 
-  /** 取当前会话最后一条用户消息（用于接管上下文提示） */
+  /** 持久化最后一条微信文本消息（接管通知用，跨实例共享） */
+  function persistLastWechatMessage(userId: string, text: string): void {
+    try {
+      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
+      fs.writeFileSync(file, JSON.stringify({ userId, text: text.slice(0, 200), ts: Date.now() }), { mode: 0o600 })
+    } catch {
+      // ignore
+    }
+  }
+
+  /** 取最后一条微信消息（从持久化文件，跨实例共享；接管时带上给用户上下文） */
   async function getLastWechatMessage(): Promise<string | null> {
     try {
-      const ctx = latestCtx
-      if (!ctx) return null
-      const branch = ctx.sessionManager.getBranch()
-      for (let i = branch.length - 1; i >= 0; i--) {
-        const entry = branch[i]
-        if (entry.type !== 'message') continue
-        const msg = (entry as { message?: { role?: string; content?: unknown } }).message
-        if (!msg || msg.role !== 'user') continue
-        const content = msg.content
-        if (typeof content === 'string') return content.slice(0, 200)
-        if (Array.isArray(content)) {
-          const textParts = (content as Array<{ type?: string; text?: string }>)
-            .filter((c) => c.type === 'text' && c.text)
-            .map((c) => c.text)
-          if (textParts.length > 0) return textParts.join(' ').slice(0, 200)
-        }
-        return null
-      }
-      return null
+      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
+      const data = JSON.parse(fs.readFileSync(file, 'utf8')) as { text?: string; ts?: number }
+      if (!data.text) return null
+      // 1 小时内才展示（太久远无意义）
+      if (data.ts && Date.now() - data.ts > 3600_000) return null
+      return data.text.slice(0, 200)
     } catch {
       return null
     }
@@ -821,8 +830,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
         void gateway.connect().catch(err => {
           log(`gateway.connect 异常退出: ${formatError(err)}`)
         })
-        // 启动后通知微信用户（仅当是接管场景时才有意义；首次启动也会发，可感知服务可用）
-        void notifyWechatTakeover()
+        // 首次启动不通知微信用户（非接管切换）
       } else {
         log(`自动启动失败: ${lockResult.message}`)
       }
