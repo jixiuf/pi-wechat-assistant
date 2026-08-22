@@ -376,6 +376,9 @@ export default function wechatAssistant(pi: ExtensionAPI) {
    *  - 已连接：续约锁（协调中心恢复→切远程清本地；被占→让位停止轮询）
    *  独立于轮询循环，保证协调中心故障/恢复都能及时收敛。
    */
+  // 协调中心连续不可达计数：连续 3 次（3s）才降级本地锁，避免 reload 抖动误判
+  let coordUnreachableCount = 0
+
   function lockHeartbeat(): void {
     const hub = getHubBridge()
     const coordUrl = getCoordUrl()
@@ -384,28 +387,31 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (coordUrl && hub?.requestRemoteLock) {
       // 客户端模式：
       //  - 协调中心可达：若本机已持有则续约（锁归本机 pid）；否则不抢（协调中心模式实例负责接管）
-      //  - 协调中心不可达：降级本地锁（唯一存活时接管）
+      //  - 协调中心连续不可达：降级本地锁（唯一存活时接管）
       void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then((res) => {
         if (res.ok) {
+          coordUnreachableCount = 0
           // 远程锁成功（续约自己持有的锁）
           clearLocalDegradedLock()
           return
         }
         if (res.unreachable) {
-          // 协调中心不可达：降级本地锁（唯一存活时接管）
-          if (!running) {
-            if (hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')) {
-              log(`协调中心不可达，降级本地锁接管微信`)
-              startPolling()
+          coordUnreachableCount++
+          // 协调中心连续不可达（≥3s，排除 reload 抖动）：降级本地锁
+          if (coordUnreachableCount >= 3) {
+            if (!running) {
+              if (hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')) {
+                log(`协调中心持续不可达，降级本地锁接管微信`)
+                startPolling()
+              }
+            } else {
+              hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')
             }
-          } else {
-            hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')
           }
           return
         }
         // 协调中心可达但锁被他人持有（或空闲）：
-        //  - 若本机在轮询 → 让位（锁归别人）
-        //  - 若本机未在轮询 → 不抢（协调中心模式的实例负责接管）
+        coordUnreachableCount = 0
         if (running) {
           log(`全局锁已被其他实例接管，微信轮询让位`)
           clearLocalDegradedLock()
@@ -891,7 +897,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   pi.on('session_shutdown', async (_event, ctx) => {
     latestCtx = ctx
     clearInterval(heartbeatTimer)
-    await stopBridge({ releaseLock: true })
+    // reload/new 等会话替换场景：不释放全局锁（避免重载窗口内他机抢锁切换持有者），
+    // 重载后同 pid 续约继续持有；仅真正退出（quit）时释放，让 TTL 自然让位
+    const reason = (_event as { reason?: string } | undefined)?.reason
+    const isQuit = reason === 'quit' || reason === undefined
+    await stopBridge({ releaseLock: isQuit })
     await disposeClient()
   })
 
