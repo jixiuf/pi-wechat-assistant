@@ -520,7 +520,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       const instanceLabel = currentInstanceName || 'local'
       const lastMsg = await getLastWechatMessage()
       const text = lastMsg
-        ? `🔁 微信已由实例 ${instanceLabel} 接管\n\n最后一条消息：${lastMsg}`
+        ? `🔁 微信已由实例 ${instanceLabel} 接管\n\n最后一条对话：\n${lastMsg}`
         : `🔁 微信已由实例 ${instanceLabel} 接管`
       await client.sendText(userId, text)
       log(`已通知微信用户接管切换: ${instanceLabel}`)
@@ -530,24 +530,55 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   }
 
   /** 持久化最后一条微信文本消息（接管通知用，跨实例共享） */
-  function persistLastWechatMessage(userId: string, text: string): void {
+  interface LastWechatMsg { userId: string; userMsg: string; aiMsg: string; ts: number }
+
+  function readLastWechatMsg(): LastWechatMsg | null {
     try {
       const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
-      fs.writeFileSync(file, JSON.stringify({ userId, text: text.slice(0, 200), ts: Date.now() }), { mode: 0o600 })
+      return JSON.parse(fs.readFileSync(file, 'utf8')) as LastWechatMsg
+    } catch {
+      return null
+    }
+  }
+
+  function writeLastWechatMsg(data: LastWechatMsg): void {
+    try {
+      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
+      fs.writeFileSync(file, JSON.stringify(data), { mode: 0o600 })
     } catch {
       // ignore
     }
   }
 
+  /** 持久化最后一条微信用户消息（接管通知用，跨实例共享） */
+  function persistLastWechatMessage(userId: string, text: string): void {
+    const prev = readLastWechatMsg()
+    writeLastWechatMsg({ userId, userMsg: text.slice(0, 200), aiMsg: prev?.aiMsg ?? '', ts: Date.now() })
+  }
+
+  /** 持久化最后一条 AI 回复（接管通知带完整对话上下文） */
+  function persistLastWechatAiReply(userId: string, text: string): void {
+    const prev = readLastWechatMsg()
+    writeLastWechatMsg({
+      userId,
+      userMsg: prev?.userMsg ?? '',
+      aiMsg: text.slice(0, 500),
+      ts: Date.now(),
+    })
+  }
+
   /** 取最后一条微信消息（从持久化文件，跨实例共享；接管时带上给用户上下文） */
+  /** 取最后一条完整对话（用户消息 + AI 回复，跨实例共享；接管时带上下文） */
   async function getLastWechatMessage(): Promise<string | null> {
     try {
-      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
-      const data = JSON.parse(fs.readFileSync(file, 'utf8')) as { text?: string; ts?: number }
-      if (!data.text) return null
+      const data = readLastWechatMsg()
+      if (!data || (!data.userMsg && !data.aiMsg)) return null
       // 1 小时内才展示（太久远无意义）
-      if (data.ts && Date.now() - data.ts > 3600_000) return null
-      return data.text.slice(0, 200)
+      if (Date.now() - data.ts > 3600_000) return null
+      const parts: string[] = []
+      if (data.userMsg) parts.push(`我：${data.userMsg}`)
+      if (data.aiMsg) parts.push(`AI：${data.aiMsg}`)
+      return parts.join('\n').slice(0, 600)
     } catch {
       return null
     }
@@ -904,6 +935,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
         await client.sendText(targetUserId, chunks[i])
       }
       turn.sentCount++
+      // 记录最后一条 AI 回复（接管通知带完整上下文）
+      persistLastWechatAiReply(targetUserId, text)
       log(`[MSG-END-DONE] incrementally sent, totalSent=${turn.sentCount}`)
     } catch (err) {
       log(`[MSG-END-ERROR] ${formatError(err)}`)
@@ -928,6 +961,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (turn.wechatConversationActive && newReplies.length > 0 && client && turn.targetUser) {
       try {
         await queue.sendRepliesToWechat(newReplies, turn.targetUser)
+        // 记录最后一条 AI 回复（接管通知带完整上下文）
+        persistLastWechatAiReply(turn.targetUser, newReplies[newReplies.length - 1])
         log(`[AGENT-END-DONE] sent ${newReplies.length} remaining replies`)
       } catch (err) {
         log(`[AGENT-END-ERROR] ${formatError(err)}`)
