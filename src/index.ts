@@ -172,7 +172,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   interface HubBridge {
     coordinatorTryLock?: (name: string, pid: number, capability?: string, force?: boolean) => boolean
-    coordinatorReleaseLock?: (name: string, capability?: string) => void
+    coordinatorReleaseLock?: (name: string, capability?: string, pid?: number) => void
     getInstanceName?: () => string
     getCoordinatorUrl?: () => string | undefined
     requestRemoteLock?: (
@@ -240,7 +240,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (coordUrl && hub?.releaseRemoteLock) {
       await hub.releaseRemoteLock(coordUrl, holderName, 'wechat')
     } else if (hub?.coordinatorReleaseLock) {
-      hub.coordinatorReleaseLock(holderName, 'wechat')
+      hub.coordinatorReleaseLock(holderName, 'wechat', process.pid)
     }
     if (lockSessionId) await releaseLock(lockSessionId)
   }
@@ -360,41 +360,78 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     },
     heartbeat: () => {
       // 轮询迭代中续约全局锁（双保险，主心跳是独立定时器）
-      renewLockHeartbeat()
+      lockHeartbeat()
     },
   })
 
-  /** 续约全局锁：持有锁期间每 3s 调用（独立于轮询循环，轮询失败也不丢锁） */
-  function renewLockHeartbeat(): void {
-    if (!running) return
+  // --- 锁状态机 ---
+  // 客户端（有 coordUrl）：远程锁优先；协调中心不可达时降级本地锁（临时），
+  // 协调中心恢复后首个心跳重新仲裁：成功续约远程锁并清理本地锁，被占则让位。
+  // 协调中心模式（无 coordUrl）：本地锁唯一持有者。
+
+  /** 锁状态机：每 1s 运行一次。
+   *  - 未连接：尝试获取锁（协调中心不可达→降级本地；空闲→接管启动轮询）
+   *  - 已连接：续约锁（协调中心恢复→切远程清本地；被占→让位停止轮询）
+   *  独立于轮询循环，保证协调中心故障/恢复都能及时收敛。
+   */
+  function lockHeartbeat(): void {
     const hub = getHubBridge()
     const coordUrl = getCoordUrl()
     const holderName = getLockHolderName()
+
     if (coordUrl && hub?.requestRemoteLock) {
+      // 客户端模式：
+      //  - 协调中心可达：若本机已持有则续约（锁归本机 pid）；否则不抢（协调中心模式实例负责接管）
+      //  - 协调中心不可达：降级本地锁（唯一存活时接管）
       void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then((res) => {
-        if (res.ok) return
-        if (res.unreachable) {
-          // 协调中心不可达：保持轮询（服务器 pi 停了，本机继续服务），降级本地锁续约
-          hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')
+        if (res.ok) {
+          // 远程锁成功（续约自己持有的锁）
+          clearLocalDegradedLock()
           return
         }
-        // 协调中心可达但锁被他人持有：让位
-        log(`全局锁已被其他实例接管，微信轮询让位`)
-        void stopBridge({ releaseLock: false })
+        if (res.unreachable) {
+          // 协调中心不可达：降级本地锁（唯一存活时接管）
+          if (!running) {
+            if (hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')) {
+              log(`协调中心不可达，降级本地锁接管微信`)
+              startPolling()
+            }
+          } else {
+            hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')
+          }
+          return
+        }
+        // 协调中心可达但锁被他人持有（或空闲）：
+        //  - 若本机在轮询 → 让位（锁归别人）
+        //  - 若本机未在轮询 → 不抢（协调中心模式的实例负责接管）
+        if (running) {
+          log(`全局锁已被其他实例接管，微信轮询让位`)
+          clearLocalDegradedLock()
+          void stopBridge({ releaseLock: false })
+        }
       }).catch(() => {})
       return
     }
     if (hub?.coordinatorTryLock) {
+      // 协调中心模式：本地锁唯一持有者
       const ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
-      if (!ok) {
+      if (ok) {
+        if (!running) startPolling()
+      } else if (running) {
         log(`全局锁已被其他实例接管，微信轮询让位`)
         void stopBridge({ releaseLock: false })
       }
     }
   }
 
-  // 独立心跳定时器：持有锁期间每 3s 续约（TTL 10s，留足余量）
-  const heartbeatTimer = setInterval(() => renewLockHeartbeat(), 3000)
+  /** 清理本地降级锁（仅当锁归本进程时）——协调中心恢复后避免双锁 */
+  function clearLocalDegradedLock(): void {
+    const hub = getHubBridge()
+    hub?.coordinatorReleaseLock?.(getLockHolderName(), 'wechat', process.pid)
+  }
+
+  // 独立心跳定时器：每 1s 运行锁状态机（不依赖 running，保证故障/恢复及时收敛）
+  const heartbeatTimer = setInterval(() => lockHeartbeat(), 1000)
 
   /** gateway 入站消息 → 渠道内部处理（从 rawMessage 恢复完整 IncomingMessage） */
   async function handleGatewayMessage(m: {
