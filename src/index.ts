@@ -16,6 +16,7 @@ import { MessageQueue } from './queue.js'
 import { handleRemoteCommand, type RemoteCommandDeps } from './remote-commands.js'
 import { registerCommands, type CommandDeps } from './commands.js'
 import { ok, fail, formatError, isAbortError, extractAllAssistantReplies, extractTextFromMessageContent } from './utils.js'
+import type { WechatQuestionBridge } from './questionnaire.js'
 import {
   POLL_RETRY_BASE_MS,
   POLL_RETRY_MAX_MS,
@@ -274,6 +275,23 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       if (handled) return
     }
 
+    // 待答问题拦截：目标用户的文字消息作为答案消费（含语音转文字、图片+文字）
+    if (message.text) {
+      if (queue.answerPendingQuestion(message.userId, message.text)) {
+        log(`[QUESTION-ANSWER] consumed text as answer from ${message.userId}`)
+        return
+      }
+    } else if (queue.pendingQuestionUserId === message.userId) {
+      // 等待答案期间收到无文字消息（纯图片/文件等）→ 提示重发，不消费
+      log(`[QUESTION-ANSWER] non-text message while waiting, prompting retry`)
+      try {
+        await activeClient.sendText(message.userId, '⏳ 当前正在等待文字答案，请用文字回复（回复 0 取消）')
+      } catch (err) {
+        log(`回复提示失败: ${formatError(err)}`)
+      }
+      return
+    }
+
     queue.enqueue(message)
   }
 
@@ -376,6 +394,33 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       }
     },
   })
+
+  // ============================================================================
+  // 微信问卷桥接 API（供 ask-user-question-rpc 等扩展在微信 turn 中委托提问）
+  // ============================================================================
+
+  const wechatQuestionBridge: WechatQuestionBridge = {
+    isWechatTurnActive: () => running && !!client && turn.wechatConversationActive,
+    getActiveUserId: () => turn.targetUser,
+    askQuestion: async (opts) => {
+      if (!running || !client) return null
+      const userId = opts.userId ?? turn.targetUser ?? queue.lastWechatUser?.userId
+      if (!userId) return null
+      const answer = await queue.askQuestion({ ...opts, userId })
+      if (!answer) return null
+      switch (answer.kind) {
+        case 'option':
+          return { kind: 'option', answer: answer.label }
+        case 'multi':
+          return { kind: 'multi', answer: null, selected: answer.labels }
+        case 'custom':
+          return { kind: 'custom', answer: answer.text }
+        default:
+          return { kind: 'chat', answer: null }
+      }
+    },
+  }
+  ;(globalThis as unknown as { __PI_WECHAT_BRIDGE__?: WechatQuestionBridge }).__PI_WECHAT_BRIDGE__ = wechatQuestionBridge
 
   // ============================================================================
   // 事件处理
@@ -512,6 +557,12 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (queue.activeRequest) {
       await client?.stopTyping(queue.activeRequest.userId).catch(() => {})
       queue.activeRequest = null
+    }
+
+    // 兜底：agent 结束时仍有未完成的问题（异常中断路径）→ 取消等待
+    if (queue.pendingQuestion) {
+      log(`[AGENT-END] cancelling leftover pending question`)
+      queue.cancelPendingQuestion()
     }
     updateStatusBar()
 

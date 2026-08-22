@@ -19,6 +19,13 @@ import { summarizePreview, formatError } from './utils.js'
 import { redactUrl } from './logger.js'
 import type { IncomingMessage } from './types.js'
 import { getConfigCache } from './auth.js'
+import {
+  formatQuestionMessage,
+  getQuestionTimeoutMs,
+  parseQuestionAnswer,
+  type ParsedQuestionAnswer,
+  type QuestionOption,
+} from './questionnaire.js'
 
 // --- 类型 ---
 
@@ -40,6 +47,14 @@ export interface QueuedMessage {
 }
 
 export type Ctx = ExtensionContext | ExtensionCommandContext
+
+/** 待答问题状态（等待微信用户回复） */
+interface PendingQuestion {
+  userId: string
+  options: QuestionOption[]
+  multiSelect: boolean
+  resolve: (answer: ParsedQuestionAnswer | null) => void
+}
 
 // --- 配置读取（同步，基于内存缓存） ---
 
@@ -88,6 +103,13 @@ export class MessageQueue {
   private batchTimer: ReturnType<typeof setTimeout> | null = null
   private imageBatchAckSent = false
   private _draining = false
+
+  /** 待答问题（非空时目标用户的文本消息会被拦截为答案，不进入队列） */
+  pendingQuestion: PendingQuestion | null = null
+
+  get pendingQuestionUserId(): string | null {
+    return this.pendingQuestion?.userId ?? null
+  }
 
   /** 待注入的已保存文件列表（文件不进入队列和 AI 注入，等文字/图片触发时拼接） */
   private accumulatedFiles: Array<{ name: string; size: number; path: string }> = []
@@ -248,6 +270,103 @@ export class MessageQueue {
     }
   }
 
+  // --- 待答问题（微信选项式问卷） ---
+
+  /**
+   * 通过微信向指定用户提问，挂起等待回复。
+   * 返回 null 表示超时 / 被取消 / 桥接不可用。
+   */
+  askQuestion(opts: {
+    userId: string
+    question: string
+    header?: string
+    options: QuestionOption[]
+    multiSelect?: boolean
+    index?: number
+    total?: number
+    timeoutMs?: number
+    signal?: AbortSignal
+  }): Promise<ParsedQuestionAnswer | null> {
+    const client = this.getClient()
+    if (!client || !this.isRunning()) return Promise.resolve(null)
+
+    // 上一个未完成的问题先取消
+    this.cancelPendingQuestion()
+
+    return new Promise((resolve) => {
+      const userId = opts.userId
+      const timeoutMs = opts.timeoutMs ?? getQuestionTimeoutMs()
+      let settled = false
+      let pending: PendingQuestion
+      let timer: ReturnType<typeof setTimeout>
+
+      const settle = (answer: ParsedQuestionAnswer | null): void => {
+        if (settled) return
+        settled = true
+        if (this.pendingQuestion === pending) this.pendingQuestion = null
+        clearTimeout(timer)
+        opts.signal?.removeEventListener('abort', onAbort)
+        resolve(answer)
+      }
+
+      const onAbort = (): void => settle(null)
+
+      timer = setTimeout(() => {
+        void client.sendText(userId, '⏰ 等待回复超时，问题已取消').catch(() => {})
+        settle(null)
+      }, timeoutMs)
+
+      pending = {
+        userId,
+        options: opts.options,
+        multiSelect: opts.multiSelect ?? false,
+        resolve: settle,
+      }
+      this.pendingQuestion = pending
+      opts.signal?.addEventListener('abort', onAbort, { once: true })
+
+      // 发送问题文本（发送失败立即取消）
+      const text = formatQuestionMessage(opts)
+      client.sendText(userId, text).catch((err) => {
+        debugLog(`[QUESTION-SEND-FAIL] ${formatError(err)}`)
+        settle(null)
+      })
+    })
+  }
+
+  /**
+   * 尝试把微信文本消息作为待答问题的答案消费。
+   * 返回 true 表示已消费（消息不再进入正常队列）。
+   */
+  answerPendingQuestion(userId: string, text: string): boolean {
+    const pending = this.pendingQuestion
+    if (!pending || pending.userId !== userId) return false
+
+    const parsed = parseQuestionAnswer(text, pending.options, pending.multiSelect)
+
+    if (parsed.kind === 'invalid') {
+      // 数字越界或空文本 → 提示重发，不结束等待
+      const hint = pending.multiSelect
+        ? '⚠️ 请输入有效选项数字（如 1,3），或直接输入自定义文字；回复 0 取消'
+        : '⚠️ 请输入有效选项数字，或直接输入自定义文字；回复 0 取消'
+      void this.getClient()?.sendText(userId, hint).catch(() => {})
+      return true
+    }
+
+    if (parsed.kind === 'cancel') {
+      void this.getClient()?.sendText(userId, '✖️ 问题已取消').catch(() => {})
+    }
+    pending.resolve(parsed)
+    return true
+  }
+
+  /** 取消当前待答问题（resolve null，不消费任何消息） */
+  cancelPendingQuestion(): void {
+    const pending = this.pendingQuestion
+    if (!pending) return
+    pending.resolve(null)
+  }
+
   // --- 队列排出 ---
 
   async drain(): Promise<void> {
@@ -390,6 +509,7 @@ export class MessageQueue {
   // --- 重置 ---
 
   reset(): void {
+    this.cancelPendingQuestion()
     this.queue.length = 0
     this.pendingInjection = null
     this.activeRequest = null
