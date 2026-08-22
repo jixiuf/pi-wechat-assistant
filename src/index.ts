@@ -359,33 +359,42 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       log(`轮询失败: ${formatError(err)}`)
     },
     heartbeat: () => {
-      // 轮询迭代中续约全局锁：持有者心跳失败（TTL 10s）后他机才能接管
-      const hub = getHubBridge()
-      const coordUrl = getCoordUrl()
-      const holderName = getLockHolderName()
-      if (coordUrl && hub?.requestRemoteLock) {
-        void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then((res) => {
-          if (res.ok) return
-          if (res.unreachable) {
-            // 协调中心不可达：保持轮询（服务器 pi 停了，本机继续服务），降级本地锁续约
-            hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')
-            return
-          }
-          // 协调中心可达但锁被他人持有：让位
-          log(`全局锁已被其他实例接管，微信轮询让位`)
-          void stopBridge({ releaseLock: false })
-        }).catch(() => {})
-        return
-      }
-      if (hub?.coordinatorTryLock) {
-        const ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
-        if (!ok) {
-          log(`全局锁已被其他实例接管，微信轮询让位`)
-          void stopBridge({ releaseLock: false })
-        }
-      }
+      // 轮询迭代中续约全局锁（双保险，主心跳是独立定时器）
+      renewLockHeartbeat()
     },
   })
+
+  /** 续约全局锁：持有锁期间每 3s 调用（独立于轮询循环，轮询失败也不丢锁） */
+  function renewLockHeartbeat(): void {
+    if (!running) return
+    const hub = getHubBridge()
+    const coordUrl = getCoordUrl()
+    const holderName = getLockHolderName()
+    if (coordUrl && hub?.requestRemoteLock) {
+      void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then((res) => {
+        if (res.ok) return
+        if (res.unreachable) {
+          // 协调中心不可达：保持轮询（服务器 pi 停了，本机继续服务），降级本地锁续约
+          hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')
+          return
+        }
+        // 协调中心可达但锁被他人持有：让位
+        log(`全局锁已被其他实例接管，微信轮询让位`)
+        void stopBridge({ releaseLock: false })
+      }).catch(() => {})
+      return
+    }
+    if (hub?.coordinatorTryLock) {
+      const ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
+      if (!ok) {
+        log(`全局锁已被其他实例接管，微信轮询让位`)
+        void stopBridge({ releaseLock: false })
+      }
+    }
+  }
+
+  // 独立心跳定时器：持有锁期间每 3s 续约（TTL 10s，留足余量）
+  const heartbeatTimer = setInterval(() => renewLockHeartbeat(), 3000)
 
   /** gateway 入站消息 → 渠道内部处理（从 rawMessage 恢复完整 IncomingMessage） */
   async function handleGatewayMessage(m: {
@@ -745,6 +754,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // 会话关闭 → 清理 + 落盘 context tokens
   pi.on('session_shutdown', async (_event, ctx) => {
     latestCtx = ctx
+    clearInterval(heartbeatTimer)
     await stopBridge({ releaseLock: true })
     await disposeClient()
   })
