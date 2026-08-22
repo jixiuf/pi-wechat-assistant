@@ -8,6 +8,8 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { Type } from '@sinclair/typebox'
 // @ts-ignore — @earendil-works is the current package, but the older package still carries TS declarations used for compatibility here
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
+// @ts-ignore — @earendil-works is the current package, but the older package still carries TS declarations used for compatibility here
+import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { SessionExpiredError, WeixinClient } from './client.js'
 import { acquireLock, releaseLock, loadCredentials, loadConfig } from './auth.js'
 import { debugLog, isDebugEnabled } from './logger.js'
@@ -508,6 +510,103 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   }
 
   registerCommands(pi, commandDeps)
+
+  // --- 内部命令：微信 /new 开启新会话 ---
+  // newSession 仅在扩展命令上下文（ExtensionCommandContext）可用，
+  // 微信远程命令通过 sendUserMessage(expandPromptTemplates) 触发这里。
+
+  pi.registerCommand('__wechat_new_session', {
+    description: '通过微信开启新会话（内部命令，由微信远程命令 /new 触发）',
+    handler: async (_args, ctx) => {
+      const parentSession = ctx.sessionManager.getSessionFile() ?? undefined
+      const result = await ctx.newSession({ parentSession })
+      if (result.cancelled) {
+        const g = globalThis as Record<string, unknown>
+        const pending = g.__PI_WECHAT_NEW_SESSION_CONFIRM__ as { userId?: string } | undefined
+        if (pending?.userId) {
+          delete g.__PI_WECHAT_NEW_SESSION_CONFIRM__
+          void client?.sendText(pending.userId, '❌ 开启新会话已被取消').catch(() => {})
+        }
+      }
+    },
+  })
+
+  // --- 内部命令：微信 /reload 重载扩展 ---
+
+  pi.registerCommand('__wechat_reload', {
+    description: '通过微信重载扩展（内部命令，由微信远程命令 /reload 触发）',
+    handler: async (_args, ctx) => {
+      await ctx.reload()
+    },
+  })
+
+  // --- 内部命令：微信 /prev /next /goto 切换会话 ---
+
+  const formatSessionTime = (d: Date) => {
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    return `${hh}:${mm}`
+  }
+
+  pi.registerCommand('__wechat_switch_session', {
+    description: '通过微信切换会话（内部命令，prev/next/goto 由微信远程命令触发）',
+    handler: async (args, ctx) => {
+      const [modeArg, ...restArgs] = (args || 'prev').trim().split(/\s+/)
+      const mode = modeArg as 'prev' | 'next' | 'goto'
+      const g = globalThis as Record<string, unknown>
+      const pending = g.__PI_WECHAT_SWITCH_CONFIRM__ as { userId?: string; message?: string } | undefined
+      const notify = (msg: string) => {
+        if (pending?.userId) {
+          delete g.__PI_WECHAT_SWITCH_CONFIRM__
+          void client?.sendText(pending.userId, msg).catch(() => {})
+        }
+      }
+      try {
+        const current = ctx.sessionManager.getSessionFile()
+        if (!current) {
+          notify('❌ 未找到当前会话')
+          return
+        }
+        const all = (await SessionManager.list(ctx.cwd)).sort((a, b) => b.modified.getTime() - a.modified.getTime())
+        let target: { path: string; name?: string; modified: Date }
+        let dir: string
+        if (mode === 'goto') {
+          const n = parseInt(restArgs[0] ?? '', 10)
+          if (!Number.isFinite(n) || n < 1 || n > all.length) {
+            notify(Number.isFinite(n) && n >= 1 ? `❌ 只有 ${all.length} 个会话` : '❌ 无效的序号')
+            return
+          }
+          if (all[n - 1].path === current) {
+            notify(`✅ 已经在第 ${n} 个会话了`)
+            return
+          }
+          target = all[n - 1]
+          dir = `第 ${n} 个`
+        } else {
+          const idx = all.findIndex((s) => s.path === current)
+          if (idx === -1) {
+            notify('❌ 未找到当前会话')
+            return
+          }
+          const targetIdx = mode === 'prev' ? idx + 1 : idx - 1
+          if (targetIdx < 0 || targetIdx >= all.length) {
+            notify(mode === 'prev' ? '❌ 已经没有更早的会话了' : '❌ 已经在最新的会话了')
+            return
+          }
+          target = all[targetIdx]
+          dir = mode === 'prev' ? '上一次' : '下一次'
+        }
+        if (pending) {
+          const label = target.name ?? formatSessionTime(target.modified)
+          pending.message = `✅ 已切到${dir}的会话（${label}）`
+        }
+        const result = await ctx.switchSession(target.path, { withSession: async () => {} })
+        if (result.cancelled) notify('❌ 切换会话已被取消')
+      } catch (err) {
+        notify(`❌ 切换会话失败: ${formatError(err)}`)
+      }
+    },
+  })
 
   // ============================================================================
   // AI 工具注册

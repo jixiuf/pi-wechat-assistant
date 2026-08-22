@@ -3,6 +3,8 @@
 // ============================================================================
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
+// @ts-ignore — @earendil-works is the current package, but the older package still carries TS declarations used for compatibility here
+import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { debugLog } from './logger.js'
 import { formatError } from './utils.js'
 import { getImageMaxBytes, getImageBatchWaitMs } from './queue.js'
@@ -19,7 +21,108 @@ export interface RemoteCommandDeps {
 
 type RemoteCommandFn = (args: string, userId: string, client: WeixinClient, deps: RemoteCommandDeps) => Promise<string | null>
 
+/** 触发扩展内部命令 /__wechat_switch_session，实际切换由扩展命令上下文完成 */
+async function triggerSessionSwitch(
+  deps: RemoteCommandDeps,
+  userId: string,
+  mode: 'prev' | 'next' | 'goto',
+  waitingMsg: string,
+  confirmMsg: string,
+): Promise<string | null> {
+  const ctx = deps.getCtx()
+  if (!ctx) return '❌ 会话上下文尚未就绪'
+  const client = deps.client()
+  if (!client) return '❌ 微信客户端尚未就绪'
+  await client.sendText(userId, waitingMsg).catch(() => {})
+  ;(globalThis as Record<string, unknown>).__PI_WECHAT_SWITCH_CONFIRM__ = { userId, message: confirmMsg }
+  await deps.pi.sendUserMessage(`/__wechat_switch_session ${mode}`, {
+    deliverAs: 'followUp',
+    expandPromptTemplates: true,
+  } as Parameters<typeof deps.pi.sendUserMessage>[1] & { expandPromptTemplates: boolean })
+  return null
+}
+
 const commands: Record<string, RemoteCommandFn> = {
+  async new(_args, userId, client, deps) {
+    const ctx = deps.getCtx()
+    if (!ctx) return '❌ 会话上下文尚未就绪'
+    await client.sendText(userId, '⏳ 正在开启新会话...').catch(() => {})
+    // newSession 只能在扩展命令上下文里调用，通过内部命令触发
+    // 成功后的确认消息由新会话实例（session_start）发送，这里先挂个标志
+    ;(globalThis as Record<string, unknown>).__PI_WECHAT_NEW_SESSION_CONFIRM__ = { userId }
+    await deps.pi.sendUserMessage('/__wechat_new_session', {
+      deliverAs: 'followUp',
+      expandPromptTemplates: true,
+    } as Parameters<typeof deps.pi.sendUserMessage>[1] & { expandPromptTemplates: boolean })
+    return null
+  },
+
+  async prev(_args, userId, _client, deps) {
+    return triggerSessionSwitch(deps, userId, 'prev', '⏳ 正在切到上一次的会话...', '✅ 已切到上一次的会话')
+  },
+
+  async next(_args, userId, _client, deps) {
+    return triggerSessionSwitch(deps, userId, 'next', '⏳ 正在切到下一次的会话...', '✅ 已切到下一次的会话')
+  },
+
+  async reloadAll(_args, userId, client, deps) {
+    const ctx = deps.getCtx()
+    if (!ctx) return '❌ 会话上下文尚未就绪'
+    await client.sendText(userId, '⏳ 正在广播重载所有实例...').catch(() => {})
+    // 广播：通过 hub 桥（本机实例广播文件 + 客户端 POST envelope 跨机器分发）
+    const hub = (globalThis as Record<string, unknown>).__PI_HUB__ as
+      | { broadcastReload?: () => void }
+      | undefined
+    hub?.broadcastReload?.()
+    await deps.pi.sendUserMessage('/__wechat_reload', {
+      deliverAs: 'followUp',
+      expandPromptTemplates: true,
+    } as Parameters<typeof deps.pi.sendUserMessage>[1] & { expandPromptTemplates: boolean })
+    return null
+  },
+
+  async sessions(_args, _userId, _client, deps) {
+    const ctx = deps.getCtx()
+    if (!ctx) return '❌ 会话上下文尚未就绪'
+    const current = ctx.sessionManager.getSessionFile()
+    const all = (await SessionManager.list(ctx.cwd)).sort((a, b) => b.modified.getTime() - a.modified.getTime())
+    if (all.length === 0) return '还没有会话'
+    const fmt = (d: Date) => {
+      const hh = String(d.getHours()).padStart(2, '0')
+      const mm = String(d.getMinutes()).padStart(2, '0')
+      return `${hh}:${mm}`
+    }
+    const lines = ['最近的会话:']
+    const shown = all.slice(0, 10)
+    for (const [i, s] of shown.entries()) {
+      const isCurrent = s.path === current
+      const clean = (t: string) => t.replace(/^\[语音转文字\]\s*/, '').replace(/\s+/g, ' ').trim()
+      const topic = clean(s.firstMessage || '')
+      const truncated = topic.length > 18 ? `${topic.slice(0, 18)}…` : topic
+      const label = s.name
+        ? `${s.name}（${fmt(s.modified)}）`
+        : truncated
+          ? `${fmt(s.modified)} ${truncated}`
+          : fmt(s.modified)
+      lines.push(`${i + 1}. ${label}${isCurrent ? '（当前）' : ''}`)
+    }
+    if (all.length > shown.length) lines.push(`  ...还有 ${all.length - shown.length} 个`)
+    lines.push('', '说「上一次的会话」/「下一次的会话」或「切到会话 序号」切换')
+    return lines.join('\n')
+  },
+
+  async goto(args, userId, _client, deps) {
+    const n = parseInt(args, 10)
+    if (!Number.isFinite(n) || n < 1) return '❌ 请输入序号，如「切到 2」'
+    const ctx = deps.getCtx()
+    if (!ctx) return '❌ 会话上下文尚未就绪'
+    const all = (await SessionManager.list(ctx.cwd)).sort((a, b) => b.modified.getTime() - a.modified.getTime())
+    if (n > all.length) return `❌ 只有 ${all.length} 个会话`
+    const target = all[n - 1]
+    if (target.path === ctx.sessionManager.getSessionFile()) return `✅ 已经在第 ${n} 个会话了`
+    return triggerSessionSwitch(deps, userId, 'goto', `⏳ 正在切到第 ${n} 个会话...`, `✅ 已切到第 ${n} 个会话`)
+  },
+
   async model(args, userId, client, deps) {
     const ctx = deps.getCtx()
     if (!ctx) return '❌ 会话上下文尚未就绪，请稍后再试'
@@ -245,6 +348,12 @@ const commands: Record<string, RemoteCommandFn> = {
       '📋 微信远程命令:',
       '',
       '/status          查看当前状态',
+      '/new             开启新会话',
+      '/prev            切到上一次的会话（更早）',
+      '/next            切到下一次的会话（更新）',
+      '/sessions        列出最近的会话（带序号）',
+      '/goto <序号>      按序号切换到指定会话',
+      '/reload-all      广播重载所有实例',
       '/stop            停止当前生成',
       '/model           查看 / 切换模型',
       '/name <名称>     设置会话名称',
@@ -252,7 +361,7 @@ const commands: Record<string, RemoteCommandFn> = {
       '/config          查看图片相关配置',
       '/help            显示帮助',
       '',
-      '高级: /thinking, /tools, /compact',
+      '高级: /thinking, /tools, /compact, /reload',
       '直接发文字、语音、图片、文件 = 正常对话',
     ].join('\n')
   },
