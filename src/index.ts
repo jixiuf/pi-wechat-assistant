@@ -177,7 +177,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     getCoordinatorUrl?: () => string | undefined
     requestRemoteLock?: (
       baseUrl: string, name: string, pid: number, capability?: string, force?: boolean,
-    ) => Promise<{ ok: boolean; holder?: { name?: string } | null }>
+    ) => Promise<{ ok: boolean; unreachable?: boolean; holder?: { name?: string } | null }>
     releaseRemoteLock?: (baseUrl: string, name: string, capability?: string) => Promise<void>
   }
 
@@ -205,6 +205,15 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       if (res.ok) {
         lockSessionId = getLockId()
         return { success: true, message: '已获取全局锁' }
+      }
+      if (res.unreachable) {
+        // 协调中心不可达（服务器 pi 可能已停）→ 降级本地锁接管，不让位
+        log(`协调中心不可达，降级本地锁接管微信`)
+        if (hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')) {
+          lockSessionId = getLockId()
+          return { success: true, message: '协调中心不可达，已本地接管' }
+        }
+        return { success: false, message: '本地锁获取失败' }
       }
       const holder = res.holder?.name
       return { success: false, message: `微信已被其他实例接管 (${holder ?? '未知'})` }
@@ -354,18 +363,22 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       const hub = getHubBridge()
       const coordUrl = getCoordUrl()
       const holderName = getLockHolderName()
-      let ok = false
       if (coordUrl && hub?.requestRemoteLock) {
         void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then((res) => {
-          if (!res.ok) {
-            log(`全局锁已被其他实例接管，微信轮询让位`)
-            void stopBridge({ releaseLock: false })
+          if (res.ok) return
+          if (res.unreachable) {
+            // 协调中心不可达：保持轮询（服务器 pi 停了，本机继续服务），降级本地锁续约
+            hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')
+            return
           }
+          // 协调中心可达但锁被他人持有：让位
+          log(`全局锁已被其他实例接管，微信轮询让位`)
+          void stopBridge({ releaseLock: false })
         }).catch(() => {})
         return
       }
       if (hub?.coordinatorTryLock) {
-        ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
+        const ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
         if (!ok) {
           log(`全局锁已被其他实例接管，微信轮询让位`)
           void stopBridge({ releaseLock: false })
@@ -561,15 +574,35 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (hub?.registerGateway) {
       hub.registerGateway(gateway)
     }
-    // 接管让位：hub 收到指向本实例的接管请求（capability=wechat）→ 本机停止轮询
+    // 接管让位 + 自动接管：
+    //  - target 是其他实例 → 本机让位（停止轮询）
+    //  - target 是本机 / local / 空 → 自动接管信号（锁空闲或协调中心不可达），尝试启动轮询
     hub?.onTakeoverRequest?.((req) => {
       const cap = req.capability ?? 'wechat'
       if (cap !== 'wechat') return
       const target = req.targetName
-      if (target && target !== currentInstanceName && target !== 'local') return
-      if (!running) return
-      log(`收到接管请求 (${req.targetName ?? 'local'})，微信轮询让位`)
-      void stopBridge({ releaseLock: false })
+      if (target && target !== currentInstanceName && target !== 'local') {
+        if (running) {
+          log(`收到接管请求 (${target})，微信轮询让位`)
+          void stopBridge({ releaseLock: false })
+        }
+        return
+      }
+      // 自动接管信号：本机应尝试获取锁并启动轮询
+      if (running) return
+      void (async () => {
+        const lockResult = await lock()
+        if (!lockResult.success) {
+          log(`自动接管尝试失败: ${lockResult.message}`)
+          return
+        }
+        running = true
+        agentIdle = true
+        pollAbort = new AbortController()
+        notify(`微信桥接已接管 📱`, 'info')
+        updateStatusBar()
+        void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
+      })()
     })
 
     const config = await loadConfig()
