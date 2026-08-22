@@ -532,7 +532,48 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   /** 持久化最后一条微信文本消息（接管通知用，跨实例共享） */
   interface LastWechatMsg { userId: string; userMsg: string; aiMsg: string; ts: number }
 
-  function readLastWechatMsg(): LastWechatMsg | null {
+  /** hub 桥的 lastMsg 读写（协调中心模式本地/客户端模式远程，跨实例共享） */
+  function getHubLastMsgBridge(): {
+    getLastMsg?: () => Promise<LastWechatMsg | null>
+    setLastMsg?: (data: Partial<LastWechatMsg>) => Promise<void>
+  } | null {
+    return ((globalThis as Record<string, unknown>).__PI_HUB__ ?? null) as ReturnType<typeof getHubLastMsgBridge>
+  }
+
+  /** 持久化最后一条微信用户消息（接管通知用，跨实例共享） */
+  function persistLastWechatMessage(userId: string, text: string): void {
+    const hub = getHubLastMsgBridge()
+    if (hub?.setLastMsg) {
+      void hub.setLastMsg({ userId, userMsg: text.slice(0, 200) })
+      return
+    }
+    // 无 hub（降级）：本地写
+    try {
+      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
+      const prev = readLocalLastWechatMsg()
+      fs.writeFileSync(file, JSON.stringify({ userId, userMsg: text.slice(0, 200), aiMsg: prev?.aiMsg ?? '', ts: Date.now() }), { mode: 0o600 })
+    } catch {
+      // ignore
+    }
+  }
+
+  /** 持久化最后一条 AI 回复（接管通知带完整对话上下文） */
+  function persistLastWechatAiReply(userId: string, text: string): void {
+    const hub = getHubLastMsgBridge()
+    if (hub?.setLastMsg) {
+      void hub.setLastMsg({ userId, aiMsg: text.slice(0, 500) })
+      return
+    }
+    try {
+      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
+      const prev = readLocalLastWechatMsg()
+      fs.writeFileSync(file, JSON.stringify({ userId, userMsg: prev?.userMsg ?? '', aiMsg: text.slice(0, 500), ts: Date.now() }), { mode: 0o600 })
+    } catch {
+      // ignore
+    }
+  }
+
+  function readLocalLastWechatMsg(): LastWechatMsg | null {
     try {
       const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
       return JSON.parse(fs.readFileSync(file, 'utf8')) as LastWechatMsg
@@ -541,37 +582,14 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     }
   }
 
-  function writeLastWechatMsg(data: LastWechatMsg): void {
-    try {
-      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
-      fs.writeFileSync(file, JSON.stringify(data), { mode: 0o600 })
-    } catch {
-      // ignore
-    }
-  }
-
-  /** 持久化最后一条微信用户消息（接管通知用，跨实例共享） */
-  function persistLastWechatMessage(userId: string, text: string): void {
-    const prev = readLastWechatMsg()
-    writeLastWechatMsg({ userId, userMsg: text.slice(0, 200), aiMsg: prev?.aiMsg ?? '', ts: Date.now() })
-  }
-
-  /** 持久化最后一条 AI 回复（接管通知带完整对话上下文） */
-  function persistLastWechatAiReply(userId: string, text: string): void {
-    const prev = readLastWechatMsg()
-    writeLastWechatMsg({
-      userId,
-      userMsg: prev?.userMsg ?? '',
-      aiMsg: text.slice(0, 500),
-      ts: Date.now(),
-    })
-  }
-
   /** 取最后一条微信消息（从持久化文件，跨实例共享；接管时带上给用户上下文） */
   /** 取最后一条完整对话（用户消息 + AI 回复，跨实例共享；接管时带上下文） */
   async function getLastWechatMessage(): Promise<string | null> {
     try {
-      const data = readLastWechatMsg()
+      const hub = getHubLastMsgBridge()
+      const data = hub?.getLastMsg
+        ? await hub.getLastMsg()
+        : readLocalLastWechatMsg()
       if (!data || (!data.userMsg && !data.aiMsg)) return null
       // 1 小时内才展示（太久远无意义）
       if (Date.now() - data.ts > 3600_000) return null
