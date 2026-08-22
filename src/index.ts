@@ -492,6 +492,56 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     notify('微信桥接已启动 📱', 'info')
     updateStatusBar()
     void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
+    // 接管成功后通知微信用户（感知切换）+ 带上最后一条消息
+    void notifyWechatTakeover()
+  }
+
+  /**
+   * 接管/启动成功后通知最后活跃的微信用户：告知已由本实例接管，并附最后一条消息。
+   * 用户感知不到实例切换，需主动告知。
+   */
+  async function notifyWechatTakeover(): Promise<void> {
+    try {
+      if (!client || !running) return
+      const userId = client.lastActiveUserId ?? queue.lastWechatUser?.userId
+      if (!userId) return
+      const instanceLabel = currentInstanceName || 'local'
+      const lastMsg = await getLastWechatMessage()
+      const text = lastMsg
+        ? `🔁 微信已由实例 ${instanceLabel} 接管\n\n最后一条消息：${lastMsg}`
+        : `🔁 微信已由实例 ${instanceLabel} 接管`
+      await client.sendText(userId, text)
+      log(`已通知微信用户接管切换: ${instanceLabel}`)
+    } catch (err) {
+      log(`接管通知失败: ${formatError(err)}`)
+    }
+  }
+
+  /** 取当前会话最后一条用户消息（用于接管上下文提示） */
+  async function getLastWechatMessage(): Promise<string | null> {
+    try {
+      const ctx = latestCtx
+      if (!ctx) return null
+      const branch = ctx.sessionManager.getBranch()
+      for (let i = branch.length - 1; i >= 0; i--) {
+        const entry = branch[i]
+        if (entry.type !== 'message') continue
+        const msg = (entry as { message?: { role?: string; content?: unknown } }).message
+        if (!msg || msg.role !== 'user') continue
+        const content = msg.content
+        if (typeof content === 'string') return content.slice(0, 200)
+        if (Array.isArray(content)) {
+          const textParts = (content as Array<{ type?: string; text?: string }>)
+            .filter((c) => c.type === 'text' && c.text)
+            .map((c) => c.text)
+          if (textParts.length > 0) return textParts.join(' ').slice(0, 200)
+        }
+        return null
+      }
+      return null
+    } catch {
+      return null
+    }
   }
 
   const commandDeps: CommandDeps = {
@@ -754,6 +804,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
         notify(`微信桥接已接管 📱`, 'info')
         updateStatusBar()
         void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
+        // 接管成功后通知微信用户
+        void notifyWechatTakeover()
       })()
     })
 
@@ -769,6 +821,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
         void gateway.connect().catch(err => {
           log(`gateway.connect 异常退出: ${formatError(err)}`)
         })
+        // 启动后通知微信用户（仅当是接管场景时才有意义；首次启动也会发，可感知服务可用）
+        void notifyWechatTakeover()
       } else {
         log(`自动启动失败: ${lockResult.message}`)
       }
