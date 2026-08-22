@@ -398,8 +398,12 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then((res) => {
         if (res.ok) {
           coordUnreachableCount = 0
-          // 远程锁成功（续约自己持有的锁）
+          // 远程锁成功（获取或续约）：本机是持锁者，应启动/保持轮询
           clearLocalDegradedLock()
+          if (!running) {
+            log(`已获取协调中心锁，启动微信轮询`)
+            startPolling()
+          }
           return
         }
         if (res.unreachable) {
