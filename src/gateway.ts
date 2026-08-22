@@ -57,6 +57,8 @@ export class WechatGateway implements IGateway {
     onStateChange?: () => void
     /** 轮询异常回调（会话过期等） */
     onError?: (err: unknown) => void
+    /** 每次轮询迭代的心跳续约（全局锁） */
+    heartbeat?: () => void
   }) {}
 
   get running(): boolean {
@@ -113,6 +115,8 @@ export class WechatGateway implements IGateway {
     while (this._running) {
       const client = this.deps.getClient()
       if (!client) break
+      // 每次迭代心跳续约全局锁（capability=wechat），TTL 10s，轮询间隔 2s 足够
+      this.deps.heartbeat?.()
       try {
         const messages = await client.getUpdates(this.pollAbort?.signal)
         retryDelay = POLL_RETRY_BASE_MS

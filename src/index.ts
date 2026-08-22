@@ -118,6 +118,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   let client: WeixinClient | null = null
   let running = false
   let agentIdle = true
+  let currentInstanceName = 'local'
   let pollAbort: AbortController | null = null
   let latestCtx: Ctx | null = null
   let wechatFilesDir: string | null = null
@@ -162,20 +163,50 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     }
   }
 
-  // --- 锁 ---
+  // --- 锁：优先 hub 全局锁（跨机互斥），hub 不可用时降级本地锁（同机互斥） ---
 
   function getLockId(): string {
     if (!lockSessionId) lockSessionId = `pi-wechat-${process.pid}-${Date.now().toString(36)}`
     return lockSessionId
   }
 
+  interface HubBridge {
+    coordinatorTryLock?: (name: string, pid: number, capability?: string, force?: boolean) => boolean
+    coordinatorReleaseLock?: (name: string, capability?: string) => void
+    getInstanceName?: () => string
+  }
+
+  function getHubBridge(): HubBridge | null {
+    return ((globalThis as Record<string, unknown>).__PI_HUB__ ?? null) as HubBridge | null
+  }
+
+  /** 锁持有者名：优先 hub 实例名（保证与协调中心一致），否则本机 cwd 名 */
+  function getLockHolderName(): string {
+    return getHubBridge()?.getInstanceName?.() || currentInstanceName || 'local'
+  }
+
   async function lock(): Promise<{ success: boolean; message: string }> {
+    const hub = getHubBridge()
+    if (hub?.coordinatorTryLock) {
+      // hub 全局锁：capability=wechat，跨机唯一持有者
+      const ok = hub.coordinatorTryLock(getLockHolderName(), process.pid, 'wechat')
+      if (ok) {
+        lockSessionId = getLockId()
+        return { success: true, message: '已获取全局锁' }
+      }
+      return { success: false, message: '微信已被其他 pi 实例接管 (capability=wechat)' }
+    }
+    // 降级：本地锁（无 hub 时的同机互斥）
     const result = await acquireLock(getLockId())
     if (result.success) lockSessionId = getLockId()
     return result
   }
 
   async function unlock(): Promise<void> {
+    const hub = getHubBridge()
+    if (hub?.coordinatorReleaseLock) {
+      hub.coordinatorReleaseLock(getLockHolderName(), 'wechat')
+    }
     if (lockSessionId) await releaseLock(lockSessionId)
   }
 
@@ -291,6 +322,18 @@ export default function wechatAssistant(pi: ExtensionAPI) {
         return
       }
       log(`轮询失败: ${formatError(err)}`)
+    },
+    heartbeat: () => {
+      // 轮询迭代中续约全局锁：持有者心跳失败（TTL 10s）后他机才能接管
+      const hub = getHubBridge()
+      if (hub?.coordinatorTryLock) {
+        const ok = hub.coordinatorTryLock(getLockHolderName(), process.pid, 'wechat')
+        if (!ok) {
+          // 锁已被他机抢占（capability=wechat）：本机让位，停止轮询
+          log(`全局锁已被其他实例接管，微信轮询让位`)
+          void stopBridge({ releaseLock: false })
+        }
+      }
     },
   })
 
@@ -469,17 +512,28 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     latestCtx = ctx
+    currentInstanceName = path.basename(ctx.cwd) || 'local'
     wechatFilesDir = path.join(ctx.cwd, WECHAT_FILES_SUBDIR)
     await loadClient()
     updateStatusBar()
 
     // 注册到 pi-hub（协调核心）：渠道只负责协议收发，接管/锁/消息路由由 hub 仲裁
     const hub = (globalThis as Record<string, unknown>).__PI_HUB__ as
-      | { registerGateway?: (gw: unknown) => void }
+      | { registerGateway?: (gw: unknown) => void; onTakeoverRequest?: (cb: (req: { targetName?: string; capability?: string }) => void) => void }
       | undefined
     if (hub?.registerGateway) {
       hub.registerGateway(gateway)
     }
+    // 接管让位：hub 收到指向本实例的接管请求（capability=wechat）→ 本机停止轮询
+    hub?.onTakeoverRequest?.((req) => {
+      const cap = req.capability ?? 'wechat'
+      if (cap !== 'wechat') return
+      const target = req.targetName
+      if (target && target !== currentInstanceName && target !== 'local') return
+      if (!running) return
+      log(`收到接管请求 (${req.targetName ?? 'local'})，微信轮询让位`)
+      void stopBridge({ releaseLock: false })
+    })
 
     const config = await loadConfig()
     if (config.autoStart && client) {
