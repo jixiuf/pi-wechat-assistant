@@ -375,8 +375,10 @@ export async function handleRemoteCommand(
 ): Promise<boolean> {
   const trimmed = text.trim()
   if (!trimmed.startsWith('/')) return false
-  const [cmd, ...rest] = trimmed.slice(1).split(/\s+/)
+  const [cmdRaw, ...rest] = trimmed.slice(1).split(/\s+/)
   const args = rest.join(' ')
+  // 连字符命令转驼峰：/reload-all → reloadAll（与命令表 key 对齐）
+  const cmd = cmdRaw.replace(/-([a-z])/g, (_, c) => c.toUpperCase())
   const handler = commands[cmd]
   if (!handler) return false
   try {
