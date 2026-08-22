@@ -15,6 +15,7 @@ import { splitAndFilterMarkdown } from './message.js'
 import { MessageQueue } from './queue.js'
 import { handleRemoteCommand, type RemoteCommandDeps } from './remote-commands.js'
 import { registerCommands, type CommandDeps } from './commands.js'
+import { WechatGateway } from './gateway.js'
 import { ok, fail, formatError, isAbortError, extractAllAssistantReplies, extractTextFromMessageContent } from './utils.js'
 import type { WechatQuestionBridge } from './questionnaire.js'
 import {
@@ -203,6 +204,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   async function stopBridge(options: { releaseLock?: boolean } = {}): Promise<void> {
     running = false
+    await gateway.disconnect()
     pollAbort?.abort()
     pollAbort = null
 
@@ -228,32 +230,9 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     ].join('\n')
   }
 
-  // --- 轮询 ---
+  // --- 轮询：由 WechatGateway 内部执行（iLink 长轮询 → InboundMessage） ---
 
-  async function pollMessages(activeClient: WeixinClient): Promise<void> {
-    let retryDelay = POLL_RETRY_BASE_MS
-    while (running && client === activeClient) {
-      try {
-        const messages = await activeClient.getUpdates(pollAbort?.signal)
-        retryDelay = POLL_RETRY_BASE_MS
-        for (const message of messages) {
-          await handleIncomingMessage(message, activeClient)
-        }
-      } catch (error) {
-        if (isAbortError(error)) break
-        if (error instanceof SessionExpiredError) {
-          notify('微信 Session 已过期，请执行 /wechat-login 重新登录', 'error')
-          await stopBridge({ releaseLock: true })
-          break
-        }
-        log(`轮询失败: ${formatError(error)}`)
-        await delay(retryDelay)
-        retryDelay = Math.min(retryDelay * 2, POLL_RETRY_MAX_MS)
-      }
-    }
-  }
-
-  // --- 单条消息处理 ---
+  // --- 单条消息处理（gateway.handleUserMessage 回调） ---
 
   async function handleIncomingMessage(message: IncomingMessage, activeClient: WeixinClient): Promise<void> {
     log(`收到消息: type=${message.type}, text=${message.text?.slice(0, 50)}, images=${message.imageUrls.length}`)
@@ -295,6 +274,58 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     queue.enqueue(message)
   }
 
+  // --- WechatGateway：iLink 轮询 → InboundMessage → hub（协调命令）→ handleUserMessage（渠道处理） ---
+
+  const gateway = new WechatGateway({
+    getClient: () => client,
+    handleUserMessage: (m) => {
+      // 会话命令（/model /status 等需 pi 上下文）由渠道处理；
+      // 协调命令（/instances /use /msg 等）已由 hub 先消费，不会到这里
+      void handleGatewayMessage(m)
+    },
+    onStateChange: () => updateStatusBar(),
+    onError: (err) => {
+      if (err instanceof SessionExpiredError) {
+        notify('微信 Session 已过期，请执行 /wechat-login 重新登录', 'error')
+        void stopBridge({ releaseLock: true })
+        return
+      }
+      log(`轮询失败: ${formatError(err)}`)
+    },
+  })
+
+  /** gateway 入站消息 → 渠道内部处理（从 rawMessage 恢复完整 IncomingMessage） */
+  async function handleGatewayMessage(m: {
+    id: string
+    userId: string
+    text?: string
+    attachments?: Array<{ kind: string; ref: unknown }>
+    ts: number
+    rawMessage?: unknown
+  }): Promise<void> {
+    if (!client) return
+    const raw = m.rawMessage as
+      | (IncomingMessage & { raw?: unknown })
+      | undefined
+    if (raw) {
+      // hub 已消费协调命令；此处直接走渠道完整处理（含图片/文件/问卷）
+      await handleIncomingMessage(raw, client)
+      return
+    }
+    // 无原始消息（理论上不发生）：兜底构造文本消息
+    const msg: IncomingMessage = {
+      messageId: m.id,
+      userId: m.userId,
+      text: m.text ?? '',
+      type: 'text',
+      imageUrls: [],
+      timestamp: new Date(m.ts),
+      raw: {} as IncomingMessage['raw'],
+      contextToken: '',
+    }
+    await handleIncomingMessage(msg, client)
+  }
+
   // --- 远程命令依赖 ---
 
   const remoteCommandDeps: RemoteCommandDeps = {
@@ -305,6 +336,16 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   }
 
   // --- TUI 命令注册 ---
+
+  const startPolling = async (): Promise<void> => {
+    if (running || !client) return
+    running = true
+    agentIdle = true
+    pollAbort = new AbortController()
+    notify('微信桥接已启动 📱', 'info')
+    updateStatusBar()
+    void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
+  }
 
   const commandDeps: CommandDeps = {
     pi,
@@ -319,7 +360,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     lock,
     unlock,
     stopBridge,
-    pollMessages,
+    pollMessages: startPolling,
     latestCtx: () => latestCtx,
     setLatestCtx: (ctx) => { latestCtx = ctx },
     updateStatusBar,
@@ -432,6 +473,14 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     await loadClient()
     updateStatusBar()
 
+    // 注册到 pi-hub（协调核心）：渠道只负责协议收发，接管/锁/消息路由由 hub 仲裁
+    const hub = (globalThis as Record<string, unknown>).__PI_HUB__ as
+      | { registerGateway?: (gw: unknown) => void }
+      | undefined
+    if (hub?.registerGateway) {
+      hub.registerGateway(gateway)
+    }
+
     const config = await loadConfig()
     if (config.autoStart && client) {
       const lockResult = await lock()
@@ -441,10 +490,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
         pollAbort = new AbortController()
         notify('微信桥接已自动启动 📱', 'info')
         updateStatusBar()
-        void pollMessages(client).finally(() => {
-          if (pollAbort?.signal.aborted) pollAbort = null
-        }).catch(err => {
-          log(`pollMessages 异常退出: ${formatError(err)}`)
+        void gateway.connect().catch(err => {
+          log(`gateway.connect 异常退出: ${formatError(err)}`)
         })
       } else {
         log(`自动启动失败: ${lockResult.message}`)

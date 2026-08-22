@@ -37,7 +37,7 @@ export interface CommandDeps {
   lock: () => Promise<{ success: boolean; message: string }>
   unlock: () => Promise<void>
   stopBridge: (options?: { releaseLock?: boolean }) => Promise<void>
-  pollMessages: (client: WeixinClient) => Promise<void>
+  pollMessages: () => Promise<void>
   latestCtx: () => Ctx | null
   setLatestCtx: (ctx: Ctx) => void
   updateStatusBar: () => void
@@ -126,7 +126,7 @@ async function cmdStart(_args: string, ctx: Ctx, deps: CommandDeps): Promise<voi
   deps.setPollAbort(pollAbort)
   deps.notify('微信桥接已启动 📱', 'info')
   deps.updateStatusBar()
-  void deps.pollMessages(activeClient).finally(() => {
+  void deps.pollMessages().finally(() => {
     if (deps.getPollAbort()?.signal.aborted) deps.setPollAbort(null)
   })
 }
