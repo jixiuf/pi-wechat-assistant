@@ -358,6 +358,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       // 协调命令（/instances /use /msg 等）已由 hub 先消费，不会到这里
       void handleGatewayMessage(m)
     },
+    // 问卷等待中：宽松 use 匹配（数字→切换）让位于问卷答案
+    isAwaitingAnswer: (userId) => queue.pendingQuestionUserId === userId,
     onStateChange: () => updateStatusBar(),
     onError: (err) => {
       if (err instanceof SessionExpiredError) {

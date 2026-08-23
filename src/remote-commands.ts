@@ -36,7 +36,7 @@ async function triggerSessionSwitch(
   await client.sendText(userId, waitingMsg).catch(() => {})
   ;(globalThis as Record<string, unknown>).__PI_WECHAT_SWITCH_CONFIRM__ = { userId, message: confirmMsg }
   await deps.pi.sendUserMessage(`/__wechat_switch_session ${mode}`, {
-    deliverAs: 'followUp',
+    deliverAs: 'steer',
     expandPromptTemplates: true,
   } as Parameters<typeof deps.pi.sendUserMessage>[1] & { expandPromptTemplates: boolean })
   return null
@@ -51,7 +51,7 @@ const commands: Record<string, RemoteCommandFn> = {
     // 成功后的确认消息由新会话实例（session_start）发送，这里先挂个标志
     ;(globalThis as Record<string, unknown>).__PI_WECHAT_NEW_SESSION_CONFIRM__ = { userId }
     await deps.pi.sendUserMessage('/__wechat_new_session', {
-      deliverAs: 'followUp',
+      deliverAs: 'steer',
       expandPromptTemplates: true,
     } as Parameters<typeof deps.pi.sendUserMessage>[1] & { expandPromptTemplates: boolean })
     return null
@@ -75,7 +75,19 @@ const commands: Record<string, RemoteCommandFn> = {
       | undefined
     hub?.broadcastReload?.()
     await deps.pi.sendUserMessage('/__wechat_reload', {
-      deliverAs: 'followUp',
+      deliverAs: 'steer',
+      expandPromptTemplates: true,
+    } as Parameters<typeof deps.pi.sendUserMessage>[1] & { expandPromptTemplates: boolean })
+    return null
+  },
+
+  async reload(_args, userId, client, deps) {
+    const ctx = deps.getCtx()
+    if (!ctx) return '❌ 会话上下文尚未就绪'
+    await client.sendText(userId, '⏳ 正在重载本实例扩展...').catch(() => {})
+    // 重载扩展：通过内部命令 __wechat_reload（handler 调 ctx.reload()）
+    await deps.pi.sendUserMessage('/__wechat_reload', {
+      deliverAs: 'steer',
       expandPromptTemplates: true,
     } as Parameters<typeof deps.pi.sendUserMessage>[1] & { expandPromptTemplates: boolean })
     return null
@@ -354,12 +366,19 @@ const commands: Record<string, RemoteCommandFn> = {
       '/sessions        列出最近的会话（带序号）',
       '/goto <序号>      按序号切换到指定会话',
       '/reload-all      广播重载所有实例',
+      '/reload           重载本实例扩展',
       '/stop            停止当前生成',
       '/model           查看 / 切换模型',
       '/name <名称>     设置会话名称',
       '/session         查看会话详情',
       '/config          查看图片相关配置',
       '/help            显示帮助',
+      '',
+      '协调命令（实例间）:',
+      '/instances      查看所有实例',
+      '/use <实例>     切换微信接管',
+      '/cmd <实例> <指令> 向实例发指令',
+      '/start-pi [实例] 在 tmux 中启动 pi',
       '',
       '高级: /thinking, /tools, /compact, /reload',
       '直接发文字、语音、图片、文件 = 正常对话',

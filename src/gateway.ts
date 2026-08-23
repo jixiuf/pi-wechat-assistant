@@ -38,6 +38,7 @@ export interface IGateway {
   send(target: string, m: OutboundMessage): Promise<void>
   fetchAttachment(ref: unknown): Promise<Buffer | null>
   handleUserMessage?(m: InboundMessage): void | Promise<void>
+  isAwaitingAnswer?(userId: string): boolean
 }
 
 export class WechatGateway implements IGateway {
@@ -53,6 +54,8 @@ export class WechatGateway implements IGateway {
     getClient: () => WeixinClient | null
     /** 渠道自有消息处理（会话命令/问卷/入队），由 index.ts 装配 */
     handleUserMessage: (m: InboundMessage) => void
+    /** 是否正在等待该用户的问卷答案（宽松 use 匹配时用于避免误吞数字答案） */
+    isAwaitingAnswer?: (userId: string) => boolean
     /** 心跳/状态回调（更新 status bar） */
     onStateChange?: () => void
     /** 轮询异常回调（会话过期等） */
@@ -104,6 +107,10 @@ export class WechatGateway implements IGateway {
 
   handleUserMessage(m: InboundMessage): void {
     this.deps.handleUserMessage(m)
+  }
+
+  isAwaitingAnswer(userId: string): boolean {
+    return this.deps.isAwaitingAnswer?.(userId) ?? false
   }
 
   // --- 内部：iLink 轮询 ---

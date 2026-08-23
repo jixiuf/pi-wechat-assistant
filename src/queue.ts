@@ -128,7 +128,7 @@ export class MessageQueue {
     private readonly getWechatFilesDir: () => string | null,
     private readonly sendUserMessage: (
       content: string | Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }>,
-      opts?: { deliverAs: 'followUp' },
+      opts?: { deliverAs: 'steer' },
     ) => void,
     private readonly updateStatusBar: () => void,
   ) {}
@@ -409,7 +409,7 @@ export class MessageQueue {
       this.pendingInjection = first
       log(`[DRAIN-PEND] pendingInjection set`)
     } else {
-      log(`[DRAIN-BUSY-DELIVER] agent busy, will use followUp`)
+      log(`[DRAIN-BUSY-DELIVER] agent busy, will use steer`)
     }
     void client.startTyping(first.userId).catch(() => {})
 
@@ -454,7 +454,7 @@ export class MessageQueue {
       const combinedText = texts.join('\n') + fileNote
       const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [{ type: 'text', text: combinedText }]
       for (const img of images) content.push({ type: 'image', data: img.data, mimeType: img.mediaType })
-      const deliverOpts = isBusy ? { deliverAs: 'followUp' as const } : undefined
+      const deliverOpts = isBusy ? { deliverAs: 'steer' as const } : undefined
       log(`[DRAIN-SEND] file+text, files=${files.length}, images=${images.length}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
       this.sendUserMessage(content, deliverOpts)
     } else if (hasImages) {
@@ -465,11 +465,11 @@ export class MessageQueue {
         content.push({ type: 'text', text: texts.join('\n') })
       }
       for (const img of images) content.push({ type: 'image', data: img.data, mimeType: img.mediaType })
-      const deliverOpts = isBusy ? { deliverAs: 'followUp' as const } : undefined
+      const deliverOpts = isBusy ? { deliverAs: 'steer' as const } : undefined
       log(`[DRAIN-SEND] image+text, images=${images.length}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
       this.sendUserMessage(content, deliverOpts)
     } else if (hasText) {
-      const deliverOpts = isBusy ? { deliverAs: 'followUp' as const } : undefined
+      const deliverOpts = isBusy ? { deliverAs: 'steer' as const } : undefined
       log(`[DRAIN-SEND] text, text=${texts.join(' ').slice(0, 80)}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
       this.sendUserMessage(texts.join('\n'), deliverOpts)
     } else {
