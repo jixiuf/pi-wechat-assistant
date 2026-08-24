@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { randomUUID } from 'node:crypto'
+import { Semaphore } from './semaphore.js'
 import type { ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
 import { debugLog } from './logger.js'
 import { WeixinClient } from './client.js'
@@ -70,27 +71,6 @@ export function getImageMaxBytes(): number {
   const envValue = Number(process.env.PI_WECHAT_IMAGE_MAX_BYTES)
   const value = configured ?? (Number.isFinite(envValue) && envValue > 0 ? envValue : DEFAULT_IMAGE_MAX_BYTES)
   return Math.max(1024 * 1024, value)
-}
-
-// --- 简单信号量 ---
-
-class Semaphore {
-  private _permits: number
-  private readonly _waiters: Array<() => void> = []
-
-  constructor(permits: number) {
-    this._permits = permits
-  }
-
-  async acquire(): Promise<void> {
-    if (this._permits > 0) { this._permits--; return }
-    return new Promise<void>(resolve => this._waiters.push(resolve))
-  }
-
-  release(): void {
-    const waiter = this._waiters.shift()
-    if (waiter) { waiter() } else { this._permits++ }
-  }
 }
 
 // --- 队列管理器 ---

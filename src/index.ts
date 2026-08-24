@@ -451,8 +451,9 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     hub?.coordinatorReleaseLock?.(getLockHolderName(), 'wechat', process.pid)
   }
 
-  // 独立心跳定时器：每 1s 运行锁状态机（不依赖 running，保证故障/恢复及时收敛）
-  const heartbeatTimer = setInterval(() => lockHeartbeat(), 1000)
+  // 独立心跳定时器：每 3s 运行锁状态机（不依赖 running，保证故障/恢复及时收敛）。
+  // 降频：与 GLOBAL_LOCK_TTL_MS(15s) 匹配（余量 >=3 次），减少磁盘 IO 与协调中心 HTTP 请求。
+  const heartbeatTimer = setInterval(() => lockHeartbeat(), 3000)
 
   /** gateway 入站消息 → 渠道内部处理（从 rawMessage 恢复完整 IncomingMessage） */
   async function handleGatewayMessage(m: {
