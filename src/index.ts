@@ -145,9 +145,29 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   function log(message: string): void { debugLog(message) }
 
+  /**
+   * 安全获取 ctx UI。latestCtx?.hasUI 的可选链只防 null，不防 getter 抛错：
+   * ctx 在 reload/newSession 后会变 stale，hasUI getter 内部 assertActive 会直接 throw，
+   * 导致 notify/updateStatusBar 抛异常 → 异步调用链 unhandledRejection → Node 进程崩溃。
+   * 这里 try/catch 降级为 console 输出（仅首次记录），保证进程不崩。
+   */
+  let staleCtxWarned = false
+  function safeUI(): NonNullable<Ctx['ui']> | null {
+    try {
+      return latestCtx?.hasUI ? latestCtx.ui : null
+    } catch {
+      if (!staleCtxWarned) {
+        staleCtxWarned = true
+        debugLog('[wechat-assistant] ctx 已 stale（reload/newSession 后旧 ctx 被回收），UI 降级为 console 输出')
+      }
+      return null
+    }
+  }
+
   function notify(message: string, level: 'info' | 'warning' | 'error' = 'info'): void {
-    if (latestCtx?.hasUI) {
-      latestCtx.ui.notify(message, level)
+    const ui = safeUI()
+    if (ui) {
+      ui.notify(message, level)
       if (!isDebugEnabled()) return
     }
     const printer = level === 'error' ? console.error : console.log
@@ -155,15 +175,16 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   }
 
   function updateStatusBar(): void {
-    if (!latestCtx?.hasUI) return
-    if (!client && !running) { latestCtx.ui.setStatus('wechat', ''); return }
+    const ui = safeUI()
+    if (!ui) return
+    if (!client && !running) { ui.setStatus('wechat', ''); return }
     if (running) {
       const pending = queue.pending
-      latestCtx.ui.setStatus('wechat', `[微信 ✅ 已连接${pending > 0 ? ` | 待处理:${pending}` : ''}]`)
+      ui.setStatus('wechat', `[微信 ✅ 已连接${pending > 0 ? ` | 待处理:${pending}` : ''}]`)
     } else if (client) {
-      latestCtx.ui.setStatus('wechat', '[微信 ⏸ 未连接]')
+      ui.setStatus('wechat', '[微信 ⏸ 未连接]')
     } else {
-      latestCtx.ui.setStatus('wechat', '[微信 ❌ 未登录]')
+      ui.setStatus('wechat', '[微信 ❌ 未登录]')
     }
   }
 
@@ -499,15 +520,21 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // --- TUI 命令注册 ---
 
   const startPolling = async (): Promise<void> => {
-    if (running || !client) return
-    running = true
-    agentIdle = true
-    pollAbort = new AbortController()
-    notify('微信桥接已启动 📱', 'info')
-    updateStatusBar()
-    void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
-    // 注意：不在这里通知微信用户。接管通知仅在明确的接管事件（onTakeoverRequest）触发，
-    // 避免降级接管/autoStart/heartbeat 多路径重复通知。
+    try {
+      if (running || !client) return
+      running = true
+      agentIdle = true
+      pollAbort = new AbortController()
+      notify('微信桥接已启动 📱', 'info')
+      updateStatusBar()
+      void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
+      // 注意：不在这里通知微信用户。接管通知仅在明确的接管事件（onTakeoverRequest）触发，
+      // 避免降级接管/autoStart/heartbeat 多路径重复通知。
+    } catch (err) {
+      // 防御：任何同步异常都不得让异步调用链变成 unhandledRejection（会导致 Node 进程崩溃）
+      running = false
+      log(`startPolling 异常: ${formatError(err)}`)
+    }
   }
 
   /**
