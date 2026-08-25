@@ -829,7 +829,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     latestCtx = ctx
     // 实例名与协调中心保持一致（hub 可能用 config.instanceName 覆盖 cwd 名）
-    currentInstanceName = getHubBridge()?.getInstanceName?.() || path.basename(ctx.cwd) || 'local'
+    currentInstanceName = getHubBridge()?.getInstanceName?.() || path.basename(process.env.PWD || ctx.cwd) || 'local'
     wechatFilesDir = path.join(ctx.cwd, WECHAT_FILES_SUBDIR)
     await loadClient()
     updateStatusBar()
