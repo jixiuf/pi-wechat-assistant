@@ -365,7 +365,7 @@ const commands: Record<string, RemoteCommandFn> = {
       '/next            切到下一次的会话（更新）',
       '/sessions        列出最近的会话（带序号）',
       '/goto <序号>      按序号切换到指定会话',
-      '/reload-all      广播重载所有实例',
+      '/reload      广播重载所有实例',
       '/reload           重载本实例扩展',
       '/stop            停止当前生成',
       '/model           查看 / 切换模型',
@@ -378,7 +378,7 @@ const commands: Record<string, RemoteCommandFn> = {
       '/instances      查看所有实例',
       '/use <实例>     切换微信接管',
       '/cmd <实例> <指令> 向实例发指令',
-      '/start-pi [实例] 在 tmux 中启动 pi',
+      '/start [实例] 在 tmux 中启动 pi',
       '',
       '高级: /thinking, /tools, /compact, /reload',
       '直接发文字、语音、图片、文件 = 正常对话',
@@ -396,7 +396,7 @@ export async function handleRemoteCommand(
   if (!trimmed.startsWith('/')) return false
   const [cmdRaw, ...rest] = trimmed.slice(1).split(/\s+/)
   const args = rest.join(' ')
-  // 连字符命令转驼峰：/reload-all → reloadAll（与命令表 key 对齐）
+  // 连字符命令转驼峰：/reloadall → reloadAll（与命令表 key 对齐）
   const cmd = cmdRaw.replace(/-([a-z])/g, (_, c) => c.toUpperCase())
   const handler = commands[cmd]
   if (!handler) return false

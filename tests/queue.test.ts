@@ -97,6 +97,34 @@ describe('MessageQueue — drain protection', () => {
     // Since we're not running, nothing should happen
     expect(queue.pendingInjection).toBeNull()
   })
+
+  it('survives stale ctx throw from sendUserMessage (reload) and cleans up', async () => {
+    const mockSendText = vi.fn().mockResolvedValue(undefined)
+    const mockStopTyping = vi.fn().mockResolvedValue(undefined)
+    const { queue, sendUserMessage } = makeQueue({
+      client: vi.fn(() => ({
+        startTyping: vi.fn().mockResolvedValue(undefined),
+        stopTyping: mockStopTyping,
+        sendText: mockSendText,
+      })),
+    })
+    // 模拟 reload/newSession 后旧 ctx stale：pi.sendUserMessage 同步 throw
+    sendUserMessage.mockImplementation(() => {
+      throw new Error('This extension ctx is stale after session replacement or reload.')
+    })
+
+    queue.enqueue(makeMsg({ text: 'hello' }))
+
+    // 投递失败后必须清理 pendingInjection，否则后续 drain 卡死
+    await vi.waitFor(() => {
+      expect(queue.pendingInjection).toBeNull()
+    })
+    expect(mockStopTyping).toHaveBeenCalled()
+    // 投递失败则不再发回执
+    expect(mockSendText).not.toHaveBeenCalled()
+    // 后续 drain 不再抛出（无 unhandledRejection）
+    await expect(queue.drain()).resolves.toBeUndefined()
+  })
 })
 
 describe('MessageQueue — reset', () => {
