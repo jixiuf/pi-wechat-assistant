@@ -367,6 +367,17 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       return
     }
 
+    // 触发“TUI 提问转微信”:若有挂起的 TUI 提问(ask_user_question 三路等待中),
+    // 通知其把提问转成微信问卷——用户此刻在微信发消息,桌面弹窗对它不可见。
+    // 在入队之前同步触发:信号只 resolve 等待中的 Promise,问卷发送在后续 microtask,
+    // 不会把本条消息误吞为问卷答案。
+    const pendingTui = (globalThis as unknown as {
+      __PENDING_TUI_QUESTION__?: { onWechatMessage?: (userId: string) => unknown };
+    }).__PENDING_TUI_QUESTION__;
+    try {
+      pendingTui?.onWechatMessage?.(message.userId);
+    } catch {}
+
     queue.enqueue(message)
   }
 

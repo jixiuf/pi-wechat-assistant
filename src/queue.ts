@@ -358,6 +358,10 @@ export class MessageQueue {
 
     try {
       await this._doDrain()
+    } catch (err) {
+      // 兜底：reload/newSession 后旧 ctx 的 pi 调用会同步 throw（assertActive），
+      // 任何漏网的异常都不能变成 unhandledRejection（会导致 Node 进程退出）。
+      log(`[DRAIN-ERROR] ${formatError(err)}`)
     } finally {
       this._draining = false
     }
@@ -434,9 +438,9 @@ export class MessageQueue {
       const combinedText = texts.join('\n') + fileNote
       const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [{ type: 'text', text: combinedText }]
       for (const img of images) content.push({ type: 'image', data: img.data, mimeType: img.mediaType })
-      const deliverOpts = isBusy ? { deliverAs: 'steer' as const } : undefined
-      log(`[DRAIN-SEND] file+text, files=${files.length}, images=${images.length}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
-      this.sendUserMessage(content, deliverOpts)
+      const deliverOpts = { deliverAs: 'steer' as const }
+      log(`[DRAIN-SEND] file+text, files=${files.length}, images=${images.length}, mode=${deliverOpts.deliverAs}`)
+      if (!this.deliverToPi(content, deliverOpts, log, client, first.userId)) return
     } else if (hasImages) {
       const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = []
       if (!hasText) {
@@ -445,13 +449,15 @@ export class MessageQueue {
         content.push({ type: 'text', text: texts.join('\n') })
       }
       for (const img of images) content.push({ type: 'image', data: img.data, mimeType: img.mediaType })
-      const deliverOpts = isBusy ? { deliverAs: 'steer' as const } : undefined
-      log(`[DRAIN-SEND] image+text, images=${images.length}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
-      this.sendUserMessage(content, deliverOpts)
+      const deliverOpts = { deliverAs: 'steer' as const }
+      log(`[DRAIN-SEND] image+text, images=${images.length}, mode=${deliverOpts.deliverAs}`)
+      if (!this.deliverToPi(content, deliverOpts, log, client, first.userId)) return
     } else if (hasText) {
-      const deliverOpts = isBusy ? { deliverAs: 'steer' as const } : undefined
-      log(`[DRAIN-SEND] text, text=${texts.join(' ').slice(0, 80)}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
-      this.sendUserMessage(texts.join('\n'), deliverOpts)
+      // 恒带 deliverAs:'steer'：扩展侧 agentIdle 与核心 isStreaming 存在竞态窗口（agent_start/end 事件异步派发），
+      // 误判空闲时不带 streamingBehavior 会被核心抛 "Agent is already processing"。空闲时核心忽略该字段，行为不变。
+      const deliverOpts = { deliverAs: 'steer' as const }
+      log(`[DRAIN-SEND] text, text=${texts.join(' ').slice(0, 80)}, mode=${deliverOpts.deliverAs}`)
+      if (!this.deliverToPi(texts.join('\n'), deliverOpts, log, client, first.userId)) return
     } else {
       if (hadImageMessages) {
         const limitMB = Math.round(getImageMaxBytes() / 1024 / 1024)
@@ -470,6 +476,31 @@ export class MessageQueue {
       } catch (err) {
         log(`发送回执失败: ${formatError(err)}`)
       }
+    }
+  }
+
+  /**
+   * 投递消息给 pi（触发 agent 处理）。
+   * reload/newSession 后旧扩展的 pi API 会变 stale，sendUserMessage 同步 throw（assertActive）。
+   * 这里捕获异常并清理队列状态，避免 unhandledRejection 崩溃以及
+   * pendingInjection 残留导致后续 drain 卡死。
+   * 返回 false 表示投递失败，调用方应中止本轮 drain（不再发回执）。
+   */
+  private deliverToPi(
+    content: string | Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }>,
+    deliverOpts: { deliverAs: 'steer' } | undefined,
+    log: typeof debugLog,
+    client: WeixinClient,
+    userId: string,
+  ): boolean {
+    try {
+      this.sendUserMessage(content, deliverOpts)
+      return true
+    } catch (err) {
+      log(`[DRAIN-SEND-FAIL] deliver to pi failed (stale ctx after reload/newSession?): ${formatError(err)}`)
+      this.pendingInjection = null
+      void client.stopTyping(userId).catch(() => {})
+      return false
     }
   }
 
