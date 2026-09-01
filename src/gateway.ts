@@ -62,6 +62,9 @@ export class WechatGateway implements IGateway {
     onError?: (err: unknown) => void
     /** 每次轮询迭代的心跳续约（全局锁） */
     heartbeat?: () => void
+    /** 每批消息拉取即推送实例：上报 messageId + 最新游标（推送即消费，跨实例/跨机去重）。
+     *  返回应丢弃的 messageId（已被其他实例消费过的重投消息）。 */
+    onBatchFetched?: (messageIds: string[], cursor: string) => string[]
   }) {}
 
   get running(): boolean {
@@ -127,8 +130,15 @@ export class WechatGateway implements IGateway {
       try {
         const messages = await client.getUpdates(this.pollAbort?.signal)
         retryDelay = POLL_RETRY_BASE_MS
-        for (const raw of messages) {
-          this.emitInbound(raw)
+        if (messages.length > 0) {
+          // 推送即消费：先上报（持久化游标 + 标记已消费），再按返回值丢弃其他实例已消费的重投消息
+          const skip = new Set(
+            this.deps.onBatchFetched?.(messages.map(m => m.messageId), client.cursorValue) ?? [],
+          )
+          for (const raw of messages) {
+            if (skip.has(raw.messageId)) continue
+            this.emitInbound(raw)
+          }
         }
       } catch (err) {
         if (!this._running) break

@@ -303,6 +303,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       await client.stopTyping(queue.activeRequest.userId).catch(() => {})
     }
 
+    // 停桥前立即落盘已消费状态（不留节流窗口，避免下一接管者重收最后一批消息）
+    await flushConsumedState().catch(() => {})
     queue.reset()
     turn.reset()
     if (options.releaseLock) await unlock()
@@ -381,6 +383,174 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     queue.enqueue(message)
   }
 
+  // --- 已消费标记（推送即消费，跨实例/跨机共享） ---
+  // 语义：消息被本实例拉取并推送的瞬间即标记已消费，不论后续是否真正从队列消费。
+  //  /use 切换后新接管者从协调中心恢复游标 + 已消费集，不重收旧实例已推送的消息。
+  //  协调中心不可达时降级本地文件（同机接管仍有效；跨机无协调中心时锁仲裁本就不可用）。
+
+  interface WechatPollState { cursor: string; messageIds: Record<string, number>; ts: number }
+  interface WechatStateUpdate { cursor?: string; messageIds?: string[] }
+
+  /** 已消费 messageId 内存集：id → 标记时间（含恢复的历史 + 本实例拉取的） */
+  const consumedMessageIds = new Map<string, number>()
+  /** 本实例拉取的消息：id → 标记时间（去重时排除，避免吞掉自己刚拉取的消息） */
+  const selfFetchedIds = new Map<string, number>()
+  const CONSUMED_TTL_MS = Number(process.env.PI_WECHAT_MSGID_TTL_MS) || 30 * 60_000
+
+  function pruneConsumed(): void {
+    const now = Date.now()
+    for (const [id, ts] of consumedMessageIds) {
+      if (now - ts > CONSUMED_TTL_MS) consumedMessageIds.delete(id)
+    }
+    for (const [id, ts] of selfFetchedIds) {
+      if (now - ts > CONSUMED_TTL_MS) selfFetchedIds.delete(id)
+    }
+  }
+
+  /** 是否为其他实例已消费过的重投消息（本实例拉取的不算） */
+  function isDuplicateConsumed(messageId: string): boolean {
+    return consumedMessageIds.has(messageId) && !selfFetchedIds.has(messageId)
+  }
+
+  /** hub 桥的 wechat-state 读写（协调中心模式本地/客户端模式远程，与 lastMsg 同模式） */
+  function getHubWechatStateBridge(): {
+    getWechatState?: () => Promise<WechatPollState | null>
+    pushWechatState?: (data: WechatStateUpdate) => Promise<void>
+  } | null {
+    return ((globalThis as Record<string, unknown>).__PI_HUB__ ?? null) as ReturnType<typeof getHubWechatStateBridge>
+  }
+
+  const WECHAT_STATE_FILE = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'wechat-state.json')
+
+  function readLocalWechatState(): WechatPollState | null {
+    try {
+      return JSON.parse(fs.readFileSync(WECHAT_STATE_FILE, 'utf8')) as WechatPollState
+    } catch {
+      return null
+    }
+  }
+
+  function writeLocalWechatState(update: WechatStateUpdate): void {
+    try {
+      const now = Date.now()
+      const prev = readLocalWechatState()
+      const messageIds: Record<string, number> = { ...(prev?.messageIds ?? {}) }
+      for (const id of update.messageIds ?? []) {
+        if (id) messageIds[id] = messageIds[id] ?? now
+      }
+      const merged: WechatPollState = {
+        cursor: update.cursor || prev?.cursor || '',
+        messageIds,
+        ts: now,
+      }
+      // 本地只保留 TTL 内的，防文件无限增长
+      const kept: Record<string, number> = {}
+      for (const [id, ts] of Object.entries(messageIds)) {
+        if (now - ts <= CONSUMED_TTL_MS) kept[id] = ts
+      }
+      merged.messageIds = kept
+      fs.writeFileSync(WECHAT_STATE_FILE, JSON.stringify(merged), { mode: 0o600 })
+    } catch {
+      // ignore
+    }
+  }
+
+  function buildStatePayload(cursor: string): WechatStateUpdate {
+    pruneConsumed()
+    const ids = [...consumedMessageIds.entries()]
+      .sort((a, b) => a[1] - b[1])
+      .slice(-200)
+      .map(([id]) => id)
+    return { cursor, messageIds: ids }
+  }
+
+  function dispatchState(payload: WechatStateUpdate): void {
+    const hub = getHubWechatStateBridge()
+    if (hub?.pushWechatState) {
+      void hub.pushWechatState(payload).catch(() => writeLocalWechatState(payload))
+    } else {
+      writeLocalWechatState(payload)
+    }
+  }
+
+  /** 立即推送并等待完成（停桥/退出路径用，防进程先于 POST 结束） */
+  async function dispatchStateAwait(payload: WechatStateUpdate): Promise<void> {
+    const hub = getHubWechatStateBridge()
+    if (hub?.pushWechatState) {
+      try {
+        await hub.pushWechatState(payload)
+        return
+      } catch {
+        // fallthrough 到本地落盘
+      }
+    }
+    writeLocalWechatState(payload)
+  }
+
+  /** 节流上报（2s 尾沿）：轮询高频触发时合并写 */
+  let statePushTimer: ReturnType<typeof setTimeout> | null = null
+  let lastFetchedCursor = ''
+  function reportConsumed(cursor: string): void {
+    if (cursor) lastFetchedCursor = cursor
+    if (statePushTimer) return
+    statePushTimer = setTimeout(() => {
+      statePushTimer = null
+      dispatchState(buildStatePayload(lastFetchedCursor))
+    }, 2000)
+  }
+
+  /** 停桥/退出前立即落盘，不留节流窗口（等待写入完成） */
+  async function flushConsumedState(): Promise<void> {
+    if (statePushTimer) { clearTimeout(statePushTimer); statePushTimer = null }
+    if (!client) return
+    await dispatchStateAwait(buildStatePayload(client.cursorValue))
+  }
+
+  /** 接管/启动前恢复已消费状态：优先协调中心（跨机权威），不可达降级本地文件 */
+  async function restoreConsumedState(target: WeixinClient): Promise<void> {
+    try {
+      const hub = getHubWechatStateBridge()
+      let state: WechatPollState | null = null
+      if (hub?.getWechatState) {
+        state = await hub.getWechatState()
+      }
+      if (!state || !state.cursor) state = readLocalWechatState()
+      if (!state) return
+      if (state.cursor) target.seedCursor(state.cursor)
+      const now = Date.now()
+      let count = 0
+      for (const [id, ts] of Object.entries(state.messageIds ?? {})) {
+        if (now - ts <= CONSUMED_TTL_MS) {
+          consumedMessageIds.set(id, ts)
+          count++
+        }
+      }
+      if (state.cursor || count > 0) {
+        log(`已恢复微信已消费状态: cursor=${state.cursor ? 'yes' : 'no'} messageIds=${count}`)
+      }
+    } catch {
+      // 恢复失败不影响启动（退化为旧行为：可能重复但不丢）
+    }
+  }
+
+  /** gateway 回调：每批拉取即标记已消费并上报；返回其他实例已消费过的重投 messageId（丢弃） */
+  function onBatchFetched(messageIds: string[], cursor: string): string[] {
+    pruneConsumed()
+    const now = Date.now()
+    const duplicates: string[] = []
+    for (const id of messageIds) {
+      if (!id) continue
+      if (isDuplicateConsumed(id)) duplicates.push(id)
+      consumedMessageIds.set(id, now)
+      selfFetchedIds.set(id, now)
+    }
+    reportConsumed(cursor)
+    if (duplicates.length > 0) {
+      log(`[DEDUP] 丢弃其他实例已消费的重投消息 ${duplicates.length} 条: ${duplicates.join(',')}`)
+    }
+    return duplicates
+  }
+
   // --- WechatGateway：iLink 轮询 → InboundMessage → hub（协调命令）→ handleUserMessage（渠道处理） ---
 
   const gateway = new WechatGateway({
@@ -405,6 +575,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       // 轮询迭代中续约全局锁（双保险，主心跳是独立定时器）
       lockHeartbeat()
     },
+    onBatchFetched: (ids, cursor) => onBatchFetched(ids, cursor),
   })
 
   // --- 锁状态机 ---
@@ -536,6 +707,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       running = true
       agentIdle = true
       pollAbort = new AbortController()
+      // 恢复已消费状态（游标 + messageId 集）必须在首次轮询前完成，否则新接管者会重收旧实例已推送的消息
+      await restoreConsumedState(client)
       notify('微信桥接已启动 📱', 'info')
       updateStatusBar()
       void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))

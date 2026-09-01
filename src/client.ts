@@ -157,6 +157,14 @@ export class WeixinClient {
   get accountId(): string { return this.credentials.accountId }
   get userId(): string { return this.credentials.userId }
   get lastActiveUserId(): string | null { return this._lastActiveUserId }
+  /** 当前轮询游标（供持久化/上报） */
+  get cursorValue(): string { return this.cursor }
+
+  /** 接管/重启时从持久化状态恢复游标：从上次拉取位置继续，避免后端重投已推送消息。
+   *  仅在当前游标为空（新建 client）时生效。 */
+  seedCursor(cursor: string): void {
+    if (cursor && !this.cursor) this.cursor = cursor
+  }
 
   getKnownUsers(): string[] {
     return Array.from(this.contextTokens.keys())
