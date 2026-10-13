@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Footer icons unify to standard Unicode (green `微信` label, `⇄`, green `▶` / red `⏸`) so every terminal renders them at a consistent size without Nerd Fonts or per-font fallback surprises.
+  底部图标统一为标准 Unicode（绿色 `微信`、`⇄`、绿色 `▶` / 红色 `⏸`），不依赖 Nerd Font，任何终端尺寸一致。
+
 ### Fixed
 - Notify on final settlement for hosts that expose `agent_settled` but never emit `agent_before_settle` (e.g. Pi 0.84.x): until the host is seen emitting a boundary event, a settled run with an observed error notifies directly; capable hosts keep suppressing recovered retries.
   修复有 `agent_settled` 但不发出 `agent_before_settle` 的宿主（如 Pi 0.84.x）收不到模型失败通知的问题：宿主未见过边界事件前，稳定结束且观察到错误即直接通知；支持边界事件的宿主仍会在重试成功后保持静默。

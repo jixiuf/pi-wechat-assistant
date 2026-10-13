@@ -70,7 +70,7 @@ Two-way synchronization is enabled by default: new TUI user messages and AI repl
 
 The bridge restores cached reply context and sends the official startup/shutdown notifications. It attempts delivery even without cached context; if a contextual send is rejected with `ret=-2`, it retries once without context. This fallback does not guarantee delivery when WeChat requires fresh user activity. `/wechat status` distinguishes polling state, cached context, and the most recent send API result; cached context does not prove validity, and API success is not a read receipt.
 
-The compact footer has no surrounding brackets and uses a WeChat logo (Nerd Font required), `⇄` only when two-way sync is enabled, and `▶` / `⏸` for running / stopped. Queue counts and send failures appear only when relevant; credentials and successful-send diagnostics remain in `/wechat status`. The logo uses WeChat green (`#07C160`) on truecolor terminals and white otherwise. Running / stopped indicators use green / red (standard ANSI colors on non-truecolor terminals); `NO_COLOR` disables all styling. If your terminal font lacks the logo, start with `PI_WECHAT_STATUS_ICON=text pi` for a text fallback.
+The compact footer has no surrounding brackets and uses standard Unicode glyphs only — a green `微信` label, `⇄` while two-way sync is enabled, and green `▶` / red `⏸` for running / stopped — so every terminal renders them at a consistent size without Nerd Fonts. Queue counts and send failures appear only when relevant; credentials and successful-send diagnostics remain in `/wechat status`. The logo uses WeChat green (`#07C160`) on truecolor terminals and white otherwise. Running / stopped indicators use green / red (standard ANSI colors on non-truecolor terminals); `NO_COLOR` disables all styling. If your terminal font lacks the logo, start with `PI_WECHAT_STATUS_ICON=text pi` for a text fallback.
 
 ## TUI Commands
 
@@ -261,7 +261,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 
 启动会恢复已保存的消息发送凭据（`context_token`），并调用官方上线通知；停止时调用下线通知。没有消息发送凭据也会尝试发送；携带该凭据发送被明确以 `ret=-2` 拒绝时，去掉该凭据重试一次。这个兜底不保证绕过微信侧需要新用户消息的限制。`/wechat status` 分别显示登录凭据、轮询状态、消息发送凭据和最近发送接口结果：发送凭据已保存不代表仍有效，接口成功不代表已读。
 
-底部不加方括号，仅保留微信图标（需要 Nerd Font）、`⇄`（仅双向同步开启时显示）及 `▶` / `⏸`（运行 / 停止）。只在有排队消息或发送失败时追加提示；凭据与成功发送详情留在 `/wechat status`。微信图标在真彩色终端使用微信绿（`#07C160`），否则降级为白色；运行 / 停止图标分别为绿色 / 红色（非真彩色终端使用标准 ANSI 颜色）。设置 `NO_COLOR` 可关闭所有着色。字体没有微信图标时，用 `PI_WECHAT_STATUS_ICON=text pi` 启动可切回文字。
+底部不加方括号，仅使用标准 Unicode 字形——绿色 `微信` 标签、`⇄`（仅双向同步开启时显示）及绿色 `▶` / 红色 `⏸`（运行 / 停止）——不依赖 Nerd Font，任何终端下尺寸一致。只在有排队消息或发送失败时追加提示；凭据与成功发送详情留在 `/wechat status`。微信图标在真彩色终端使用微信绿（`#07C160`），否则降级为白色；运行 / 停止图标分别为绿色 / 红色（非真彩色终端使用标准 ANSI 颜色）。设置 `NO_COLOR` 可关闭所有着色。字体没有微信图标时，用 `PI_WECHAT_STATUS_ICON=text pi` 启动可切回文字。
 
 ## TUI 命令
 
