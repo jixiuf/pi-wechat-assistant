@@ -5,11 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.1] - 2026-10-13
 
 ### Fixed
 - Include image counts in mirrored TUI input, including image-only messages, when bidirectional sync is enabled.
   双向同步开启时，电脑端输入的微信副本显示图片数量，并覆盖纯图片消息。
+
+### Thanks
+- Thanks to [@koudle](https://github.com/koudle) for the bidirectional-sync contribution in [PR #10](https://github.com/shenjiecode/pi-wechat-assistant/pull/10), including the image-count notice. This release completes coverage of that request with the main-branch implementation.
+  感谢 [@koudle](https://github.com/koudle) 在 [PR #10](https://github.com/shenjiecode/pi-wechat-assistant/pull/10) 中贡献双向同步方案及图片数量提示；本版通过主分支的实现补齐了该需求。
 
 ## [0.4.0] - 2026-10-13
 
