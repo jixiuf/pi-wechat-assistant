@@ -517,7 +517,9 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     updateStatusBar()
 
     const config = await loadConfig()
-    if (config.autoStart && client) await startBridge('', ctx, commandDeps, false)
+    // TUI auto-start keeps the manual behaviour, including the takeover prompt;
+    // headless modes stay silent and keep the plain lock diagnostic.
+    if (config.autoStart && client) await startBridge('', ctx, commandDeps, ctx.hasUI)
   })
 
   // Transient model context only: never persist stale stop notices in the session.

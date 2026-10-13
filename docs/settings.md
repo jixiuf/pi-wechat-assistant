@@ -7,7 +7,7 @@ Run `/wechat config` to open host-native selection and input dialogs. Each row i
 | Location | Setting | Default | Purpose |
 | --- | --- | --- | --- |
 | Common | Bidirectional sync | On | Forward new desktop input and AI replies to WeChat. Off keeps only replies to WeChat requests. |
-| Common | Auto-start WeChat bridge | Off | Attempt to connect WeChat when a pi session opens; never takes over a bridge owned by another session. Does not start/stop the current bridge. |
+| Common | Auto-start WeChat bridge | Off | Attempt to connect WeChat when a pi session opens. In the TUI, a bridge held by another session triggers the same takeover dialog as `/wechat start` (cancel leaves it untouched); headless modes report the lock instead of asking. Does not start/stop the current bridge. |
 | Common | WeChat message tag and formatting | On | One switch for the `[微信]` marker, WeChat-friendly reply formatting, and the local question-tool guard. Waits for an active task to finish before changing. |
 | Common | Reply template actions | Packaged template | View template/path, export without overwriting, or reload an edited file. These are actions, not additional switches. |
 | Advanced | WeChat /tools override | Off | Allow WeChat `/tools` to modify local tool permissions. This does not control the two WeChat file/image sending tools. |
@@ -27,7 +27,7 @@ Existing commands remain supported. Additional explicit commands are `/wechat co
 | 位置 | 配置项 | 默认值 | 为什么需要 |
 | --- | --- | --- | --- |
 | 常用 | 双向同步 | 开启 | 控制是否同步新的电脑输入和 AI 回复；关闭后仅回传微信任务回复。 |
-| 常用 | 自动启动微信桥接 | 关闭 | 打开 pi 会话时尝试连接微信；不接管其他会话已持有的桥接，不改变当前桥接启停状态。 |
+| 常用 | 自动启动微信桥接 | 关闭 | 打开 pi 会话时尝试连接微信。TUI 下若桥接被其他会话持有，会弹出与 `/wechat start` 相同的接管确认（取消则不改动原会话）；无界面模式只报告锁占用。不改变当前桥接启停状态。 |
 | 常用 | 微信消息标识与排版 | 开启 | 微信消息加来源标记（默认 [微信]），引导 AI 用短段落和文字提问，并拦截已配置的本机提问工具；有任务运行时等待其结束再修改。 |
 | 常用 | 回复模板操作 | 内置模板 | 查看模板及路径、导出默认模板、不覆盖已有文件、重载编辑后的模板；这些是操作，不额外增加开关。 |
 | 高级 | 微信端 /tools 修改本机权限 | 关闭 | 允许微信 `/tools` 命令修改本机工具权限；不控制微信文件和图片发送工具的启停。 |

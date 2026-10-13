@@ -204,6 +204,51 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(state.client.notifyStart).not.toHaveBeenCalled()
   })
 
+  it('offers the takeover dialog from auto-start when another session holds the lock', async () => {
+    state.config.autoStart = true
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session', protocol: 1 }
+    ctx.ui.select.mockResolvedValueOnce('取消')
+    await handlers.session_start({}, ctx)
+    expect(ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining('PID 424242'), expect.anything())
+    expect(ctx.ui.notify).toHaveBeenCalledWith('已取消，未改动其他会话的微信桥接。', 'info')
+    expect(activeTools).toEqual(['read', 'bash'])
+  })
+
+  it('takes over from auto-start after confirmation and starts locally', async () => {
+    state.config.autoStart = true
+    state.lockConflict = true
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session', protocol: 1 }
+    state.requestHandoff.mockImplementation(async () => {
+      state.lockConflict = false
+      state.lockState = { kind: 'missing' }
+    })
+    ctx.ui.select.mockResolvedValueOnce('请求旧会话停止，等待释放后在本会话启动')
+    await handlers.session_start({}, ctx)
+    expect(ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining('PID 424242'), expect.anything())
+    expect(state.requestHandoff).toHaveBeenCalledTimes(1)
+    expect(activeTools).toEqual(['read', 'bash', 'send_file_to_wechat', 'send_image_to_wechat'])
+    expect(ctx.ui.notify).toHaveBeenCalledWith('微信桥接已启动 📱', 'info')
+  })
+
+  it('keeps headless auto-start silent when the lock is held elsewhere', async () => {
+    state.config.autoStart = true
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session', protocol: 1 }
+    ctx.hasUI = false
+    const printed: string[] = []
+    const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { printed.push(args.join(' ')) })
+    const err = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { printed.push(args.join(' ')) })
+    try {
+      await handlers.session_start({}, ctx)
+    } finally {
+      log.mockRestore()
+      err.mockRestore()
+    }
+    expect(ctx.ui.select).not.toHaveBeenCalled()
+    expect(printed.join('')).toContain('424242')
+    expect(state.requestHandoff).not.toHaveBeenCalled()
+    expect(activeTools).toEqual(['read', 'bash'])
+  })
+
   it('keeps source changes behind the idle boundary from the settings window', async () => {
     let idle!: () => void
     ctx.isIdle.mockReturnValue(false)
