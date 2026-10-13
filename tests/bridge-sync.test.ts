@@ -429,6 +429,16 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining('API 返回成功（不代表已读）'), 'info')
   })
 
+  it('explains the fresh-activity remedy when sends are rejected with ret=-2', async () => {
+    await command('start')
+    expect(state.client.onNeedsFreshContext).toBeTypeOf('function')
+    state.client.lastSend = { success: false, at: '2026-10-13T10:00:00Z', error: 'prepare failed', code: -2, needsFreshContext: true }
+    await command('status')
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining('请先从微信发送一条消息'), 'info')
+    state.client.onNeedsFreshContext?.()
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('从微信发送一条消息激活会话'), 'warning')
+  })
+
   it('combines pending count and send failure without extra mode text, hiding both while stopped', async () => {
     state.config.bidirectionalSync = false
     await command('start')

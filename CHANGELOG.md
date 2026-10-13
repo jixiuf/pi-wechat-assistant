@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+### Fixed
+- Explain the remedy when WeChat rejects sends with `ret=-2` (fresh user activity required): a one-time warning suggests sending a message from WeChat first, and `/wechat status` marks the rejection until a send succeeds.
+  微信以 `ret=-2` 拒绝发送（需要新的用户活动）时说明补救方法：一次性警告提示先从微信发送一条消息，`/wechat status` 标注该拒绝状态直至发送成功。
+
 - Footer returns to a bracketed status chip with standard Unicode glyphs (green `微信` label, `⇄`, green `▶` / red `⏸`) so every terminal renders them at a consistent size without Nerd Fonts or per-font fallback surprises.
   底部恢复为方括号状态徽章，使用标准 Unicode（绿色 `微信`、`⇄`、绿色 `▶` / 红色 `⏸`），不依赖 Nerd Font，任何终端尺寸一致。
 

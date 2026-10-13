@@ -177,6 +177,9 @@ async function cmdStatus(_args: string, ctx: Ctx, deps: CommandDeps): Promise<vo
     `登录凭据: ${activeClient ? '已加载（有效性由接口验证）' : '未加载'}`,
     `消息发送凭据: ${activeClient?.hasContextToken ? '已保存（不代表仍有效）' : '未获取（发送时尝试不携带此凭据）'}`,
     `最近发送: ${describeApiResult(activeClient?.lastSend, 'API 返回成功（不代表已读）')}`,
+    ...(activeClient?.lastSend && !activeClient.lastSend.success && activeClient.lastSend.code === -2
+      ? ['发送被拒提示: 微信要求新的用户活动，请先从微信发送一条消息，然后重试。']
+      : []),
     `上线状态通知: ${describeApiResult(activeClient?.lastLifecycle?.start, 'API 返回成功（不代表客户端已更新）')}`,
     `下线状态通知: ${describeApiResult(activeClient?.lastLifecycle?.stop, 'API 返回成功（不代表客户端已更新）')}`,
     `双向同步: ${config.bidirectionalSync !== false ? '开启' : '关闭（仅微信任务回复）'}`,

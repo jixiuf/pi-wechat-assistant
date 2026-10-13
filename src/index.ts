@@ -198,9 +198,16 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   }
 
   function setClient(value: WeixinClient | null): void {
-    if (client) client.onStatusChange = undefined
+    if (client) {
+      client.onStatusChange = undefined
+      client.onNeedsFreshContext = undefined
+    }
     client = value
-    if (client) client.onStatusChange = updateStatusBar
+    if (client) {
+      client.onStatusChange = updateStatusBar
+      client.onNeedsFreshContext = () =>
+        notify('微信发送被拒（ret=-2）：通常需要你先从微信发送一条消息激活会话，之后本端即可直接回复。', 'warning')
+    }
     queue.lastWechatUser = client ? { userId: client.userId, contextToken: '' } : null
   }
 

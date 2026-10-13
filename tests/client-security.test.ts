@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   saveCursor: vi.fn(),
   loadSeenIds: vi.fn(),
   saveSeenIds: vi.fn(),
+  notifyNeedsFreshContext: vi.fn(),
 }))
 
 vi.mock('../src/api.js', async () => ({
@@ -172,6 +173,34 @@ describe('WeixinClient sender authorization', () => {
     await expect(client.sendText(credentials.userId, 'hello')).rejects.toThrow('prepare failed')
     expect(mocks.sendMessage).toHaveBeenCalledTimes(2)
     expect(client.lastSend?.success).toBe(false)
+  })
+
+  it('hints once per failure streak that fresh WeChat activity is required on ret=-2', async () => {
+    const client = await WeixinClient.create(credentials)
+    client.onNeedsFreshContext = mocks.notifyNeedsFreshContext
+    mocks.loadContextTokens.mockResolvedValue({ lastUserId: null, tokens: { 'bound-user': 'cached' } })
+    mocks.sendMessage.mockRejectedValue(new ApiError('prepare failed', { status: 200, code: -2 }))
+    await expect(client.sendText(credentials.userId, 'first')).rejects.toThrow()
+    await expect(client.sendText(credentials.userId, 'second')).rejects.toThrow()
+    expect(mocks.notifyNeedsFreshContext).toHaveBeenCalledTimes(1)
+    expect(client.lastSend).toMatchObject({ success: false, code: -2, needsFreshContext: true })
+
+    // A successful send re-arms the hint for the next incident.
+    mocks.sendMessage.mockResolvedValue({ ret: 0 })
+    await client.sendText(credentials.userId, 'recovers')
+    expect(client.lastSend?.needsFreshContext).toBeUndefined()
+    mocks.sendMessage.mockRejectedValue(new ApiError('rejected again', { status: 200, code: -2 }))
+    await expect(client.sendText(credentials.userId, 'again')).rejects.toThrow()
+    expect(mocks.notifyNeedsFreshContext).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not hint fresh context for non--2 failures', async () => {
+    const client = await WeixinClient.create(credentials)
+    client.onNeedsFreshContext = mocks.notifyNeedsFreshContext
+    mocks.sendMessage.mockRejectedValueOnce(new Error('network timeout'))
+    await expect(client.sendText(credentials.userId, 'hello')).rejects.toThrow('network timeout')
+    expect(mocks.notifyNeedsFreshContext).not.toHaveBeenCalled()
+    expect(client.lastSend?.needsFreshContext).toBe(false)
   })
 
   it('rejects outbound delivery to an unbound user even without context', async () => {

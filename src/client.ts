@@ -150,9 +150,12 @@ async function uploadAndBuildItem(
 // ============================================================================
 
 export class WeixinClient {
-  lastSend: ApiCallResult | null = null
+  lastSend: (ApiCallResult & { needsFreshContext?: boolean }) | null = null
   readonly lastLifecycle: { start: ApiCallResult | null; stop: ApiCallResult | null } = { start: null, stop: null }
+  /** Fired once per persistent ret=-2 streak so the UI can explain the remedy. */
+  onNeedsFreshContext?: () => void
   onStatusChange?: () => void
+  private sendFailureHinted = false
   private readonly token: string
   private baseUrl: string
   private cursor = ''
@@ -222,8 +225,15 @@ export class WeixinClient {
         await send(undefined)
       }
       this.lastSend = { success: true, at: new Date().toISOString() }
+      this.sendFailureHinted = false
     } catch (error) {
-      this.lastSend = failedApiCall(error)
+      this.lastSend = { ...failedApiCall(error), needsFreshContext: error instanceof ApiError && error.code === -2 }
+      // One warning per failure streak: repeats add no information, and a
+      // successful send re-arms the hint for the next incident.
+      if (this.lastSend.needsFreshContext && !this.sendFailureHinted) {
+        this.sendFailureHinted = true
+        this.onNeedsFreshContext?.()
+      }
       throw error
     } finally {
       this.onStatusChange?.()
