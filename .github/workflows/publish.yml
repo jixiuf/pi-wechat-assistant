@@ -35,7 +35,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
 
       # Node 22 bundles npm 10, which cannot authenticate with npm OIDC.
       - name: Install npm with trusted publishing support
@@ -67,8 +66,6 @@ jobs:
           NODE
 
       - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
