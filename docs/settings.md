@@ -6,12 +6,12 @@ Run `/wechat config` to open host-native selection and input dialogs. Each row i
 
 | Location | Setting | Default | Purpose |
 | --- | --- | --- | --- |
-| Common | Bidirectional sync | On | Mirror new desktop input and AI replies. Off keeps only replies to WeChat requests. |
-| Common | Autostart | Off | Attempt startup in future sessions; never automatically take over another owner. Does not start/stop the current bridge. |
-| Common | WeChat source and reply rules | On | One switch for the source marker, conditional reply rules, and local question-tool guard. Waits for an active task to finish before changing. |
+| Common | Bidirectional sync | On | Forward new desktop input and AI replies to WeChat. Off keeps only replies to WeChat requests. |
+| Common | Auto-start WeChat bridge | Off | Connect WeChat automatically every time a pi session opens; never takes over a bridge owned by another session. Does not start/stop the current bridge. |
+| Common | WeChat message tag and formatting | On | One switch for the `[微信]` marker, WeChat-friendly reply formatting, and the local question-tool guard. Waits for an active task to finish before changing. |
 | Common | Reply template actions | Packaged template | View template/path, export without overwriting, or reload an edited file. These are actions, not additional switches. |
-| Advanced | Remote tool control | Off | Allow WeChat `/tools` to modify local tool permissions. This does not control the two WeChat file/image sending tools. |
-| Advanced | Image batch delay | 8000 ms | Wait for related image messages; text arrives sooner and triggers processing. Range 0–60000 ms; zero disables waiting. |
+| Advanced | WeChat /tools override | Off | Allow WeChat `/tools` to modify local tool permissions. This does not control the two WeChat file/image sending tools. |
+| Advanced | Burst-image batch delay | 8000 ms | Wait for related image messages; text arrives sooner and triggers processing. Range 0–60000 ms; zero disables waiting. |
 | Advanced | Image download limit | 50 MB | Maximum downloaded image size; minimum 1 MB. Does not change the separate outgoing-file size limit. |
 
 Keep custom source-marker text and the blocked local question-tool names in `config.json`: these serve unusual integrations, rather than routine settings. Keep reply prose in `wechat-prompt.md`. Login credentials, message-send credentials, lock ownership, and the current running state are not editable preferences.
@@ -27,11 +27,11 @@ Existing commands remain supported. Additional explicit commands are `/wechat co
 | 位置 | 配置项 | 默认值 | 为什么需要 |
 | --- | --- | --- | --- |
 | 常用 | 双向同步 | 开启 | 控制是否同步新的电脑输入和 AI 回复；关闭后仅回传微信任务回复。 |
-| 常用 | 新会话自动启动 | 关闭 | 下次打开会话时尝试启动，不自动接管其他会话，不改变当前桥接启停状态。 |
-| 常用 | 微信来源与回复规则 | 开启 | 来源标识、条件式回复规则、本机提问工具守卫共用一个开关；有任务运行时等待其结束再修改。 |
+| 常用 | 自动启动微信桥接 | 关闭 | 每次打开 pi 会话时自动连接微信；不接管其他会话已持有的桥接，不改变当前桥接启停状态。 |
+| 常用 | 微信消息标识与排版 | 开启 | 微信消息加 [微信] 标记，AI 改用微信友好格式（短段落、代码分块），并阻止本机弹窗提问；有任务运行时等待其结束再修改。 |
 | 常用 | 回复模板操作 | 内置模板 | 查看模板及路径、导出默认模板、不覆盖已有文件、重载编辑后的模板；这些是操作，不额外增加开关。 |
-| 高级 | 微信端修改工具权限 | 关闭 | 允许微信 `/tools` 修改本机工具权限；不控制微信文件和图片发送工具的启停。 |
-| 高级 | 图片合并等待 | 8000 毫秒 | 等待连续图片形成一批，文字到来可提前处理；范围 0–60000，0 表示不等待。 |
+| 高级 | 微信端 /tools 修改本机权限 | 关闭 | 允许微信 `/tools` 命令修改本机工具权限；不控制微信文件和图片发送工具的启停。 |
+| 高级 | 连发图片合并等待 | 8000 毫秒 | 微信连发多张图时凑成一批处理，文字到来可提前处理；范围 0–60000，0 表示不等待。 |
 | 高级 | 单张图片下载上限 | 50 MB | 限制下载图片的大小，最低 1 MB；不改变发出文件的独立大小限制。 |
 
 自定义来源标识、阻塞提问工具名单属于少数特殊接入需求，继续通过 `config.json` 修改，不放进日常设置窗口。回复措辞放在 `wechat-prompt.md`。登录凭据、消息发送凭据、锁归属和当前运行状态不作为可编辑配置项。

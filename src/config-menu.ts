@@ -16,15 +16,15 @@ export async function showConfigMenu(ctx: ExtensionCommandContext, deps: ConfigM
   while (true) {
     const config = await deps.load()
     const entries: Array<{ id: string; label: string }> = advanced ? [
-      { id: 'remote-tools', label: `微信端修改工具权限：${enabled(config.allowRemoteTools === true)} · 微信 /tools 可改本机权限` },
-      { id: 'image-wait', label: `图片合并等待：${deps.imageWait()} 毫秒 · 等待连续图片` },
-      { id: 'image-max', label: `单张图片下载上限：${deps.imageMax() / 1024 / 1024} MB · 限制接收图片大小` },
+      { id: 'remote-tools', label: `微信端 /tools 修改本机权限：${enabled(config.allowRemoteTools === true)} · 默认关闭，谨慎开启` },
+      { id: 'image-wait', label: `连发图片合并等待：${deps.imageWait()} 毫秒 · 微信连发多张图时凑成一批` },
+      { id: 'image-max', label: `单张图片下载上限：${deps.imageMax() / 1024 / 1024} MB · 超过则拒绝下载` },
       { id: 'back', label: '返回常用设置' },
     ] : [
-      { id: 'bidirectional', label: `双向同步：${enabled(config.bidirectionalSync !== false)} · 同步电脑输入和回复` },
-      { id: 'auto-start', label: `新会话自动启动：${enabled(config.autoStart === true)} · 下次打开会话时启动` },
-      { id: 'source', label: `微信来源与回复规则：${enabled(config.messageSourceTag?.enabled !== false)} · 微信排版与文字提问` },
-      { id: 'prompt', label: '回复模板：查看 / 导出 / 重载' },
+      { id: 'bidirectional', label: `双向同步：${enabled(config.bidirectionalSync !== false)} · 电脑输入和 AI 回复也转发到微信` },
+      { id: 'auto-start', label: `自动启动微信桥接：${enabled(config.autoStart === true)} · 每次打开 pi 都自动连接微信` },
+      { id: 'source', label: `微信消息标识与排版：${enabled(config.messageSourceTag?.enabled !== false)} · 消息加 [微信] 标记，回复按微信风格` },
+      { id: 'prompt', label: '回复模板：查看 / 导出 / 重载 · 约束 AI 回复微信的格式' },
       { id: 'advanced', label: '高级设置…' },
       { id: 'close', label: '关闭' },
     ]
@@ -56,24 +56,24 @@ export async function showConfigMenu(ctx: ExtensionCommandContext, deps: ConfigM
       ]
       const current = wait ? deps.imageWait() : deps.imageMax() / 1024 / 1024
       const choice = await ctx.ui.select(
-        `${wait ? '图片合并等待' : '图片下载上限'}：当前 ${current} ${wait ? '毫秒' : 'MB'}`,
+        `${wait ? '连发图片合并等待' : '单张图片下载上限'}：当前 ${current} ${wait ? '毫秒' : 'MB'}`,
         [...presets.map(preset => preset.label), '自定义…'],
       )
       const preset = presets.find(item => item.label === choice)
       if (preset) await deps.apply(`${id} ${preset.value}`)
       else if (choice === '自定义…') {
         const value = await ctx.ui.input(wait
-          ? '图片合并等待（毫秒，0–60000；0 表示不等待，默认 8000）'
-          : '单张图片下载上限（MB，至少 1 MB；默认 50）', String(current))
+          ? '连发图片合并等待（毫秒，0–60000；0 表示不等待，默认 8000）'
+          : '单张图片下载上限（MB，至少 1；默认 50）', String(current))
         if (value !== undefined) await deps.apply(`${id} ${value.trim()}`)
       }
       continue
     }
     const descriptions: Record<string, string> = {
-      bidirectional: '双向同步：开启后转发电脑输入及 AI 回复；关闭后仅回传微信任务回复',
-      'auto-start': '新会话自动启动：下次打开会话时尝试启动，不自动接管其他会话',
-      source: '微信来源与回复规则：来源标识、回复排版约定及本机提问工具守卫共用此开关',
-      'remote-tools': '允许微信端 /tools 修改本机工具权限（默认关闭）',
+      bidirectional: '双向同步：把电脑端的输入和 AI 回复转发给微信；关闭后只有微信发起的任务回复才发回微信',
+      'auto-start': '自动启动微信桥接：每次打开 pi 会话时自动连接微信；不会接管其他会话已持有的桥接',
+      source: '微信消息标识与排版：微信消息加 [微信] 标记，AI 改用微信友好格式（短段落、代码分块），并阻止本机弹窗提问',
+      'remote-tools': '允许微信端 /tools 命令修改本机工具权限，默认关闭',
     }
     const choice = await ctx.ui.select(descriptions[id], ['开启', '关闭'])
     if (choice === '开启' || choice === '关闭') await deps.apply(`${id} ${choice === '开启' ? 'on' : 'off'}`)

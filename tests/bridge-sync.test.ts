@@ -120,7 +120,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     ctx.ui.select.mockResolvedValueOnce(undefined)
     await command('config')
     expect(ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining('微信设置'), expect.arrayContaining([
-      '双向同步：开启 · 同步电脑输入和回复', '新会话自动启动：关闭 · 下次打开会话时启动', '微信来源与回复规则：开启 · 微信排版与文字提问',
+      '双向同步：开启 · 电脑输入和 AI 回复也转发到微信', '自动启动微信桥接：关闭 · 每次打开 pi 都自动连接微信', '微信消息标识与排版：开启 · 消息加 [微信] 标记，回复按微信风格',
     ]))
     expect(registeredTools.size).toBe(0)
     expect(await handlers.before_agent_start({ systemPrompt: 'base', prompt: 'local' }, ctx)).toBeUndefined()
@@ -128,33 +128,33 @@ describe('bridge bidirectional sync and lifecycle', () => {
 
   it('saves a menu choice, preserves advanced fields and redisplays its current value', async () => {
     state.config.messageSourceTag = { wechatTag: '[自定义]', blockedTools: ['ask'] }
-    ctx.ui.select.mockResolvedValueOnce('双向同步：开启 · 同步电脑输入和回复').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
+    ctx.ui.select.mockResolvedValueOnce('双向同步：开启 · 电脑输入和 AI 回复也转发到微信').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
     await command('config')
     expect(state.config.bidirectionalSync).toBe(false)
     expect(state.config.messageSourceTag).toEqual({ wechatTag: '[自定义]', blockedTools: ['ask'] })
-    expect(ctx.ui.select.mock.calls[2][1]).toContain('双向同步：关闭 · 同步电脑输入和回复')
+    expect(ctx.ui.select.mock.calls[2][1]).toContain('双向同步：关闭 · 电脑输入和 AI 回复也转发到微信')
     expect(state.client.notifyStart).not.toHaveBeenCalled()
   })
 
   it('cancels a setting choice without saving', async () => {
     const { saveConfig } = await import('../src/auth.js')
-    ctx.ui.select.mockResolvedValueOnce('双向同步：开启 · 同步电脑输入和回复').mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined)
+    ctx.ui.select.mockResolvedValueOnce('双向同步：开启 · 电脑输入和 AI 回复也转发到微信').mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined)
     await command('config')
     expect(saveConfig).not.toHaveBeenCalled()
   })
 
   it('supports advanced numeric input including zero delay', async () => {
     ctx.ui.input = vi.fn().mockResolvedValueOnce('0')
-    ctx.ui.select.mockResolvedValueOnce('高级设置…').mockResolvedValueOnce('图片合并等待：8000 毫秒 · 等待连续图片')
+    ctx.ui.select.mockResolvedValueOnce('高级设置…').mockResolvedValueOnce('连发图片合并等待：8000 毫秒 · 微信连发多张图时凑成一批')
       .mockResolvedValueOnce('自定义…').mockResolvedValueOnce('返回常用设置').mockResolvedValueOnce(undefined)
     await command('config')
     expect(state.config.imageBatchWaitMs).toBe(0)
-    expect(ctx.ui.select.mock.calls[3][1]).toContain('图片合并等待：0 毫秒 · 等待连续图片')
+    expect(ctx.ui.select.mock.calls[3][1]).toContain('连发图片合并等待：0 毫秒 · 微信连发多张图时凑成一批')
   })
 
   it.each([
-    ['图片合并等待：8000 毫秒 · 等待连续图片', '2 秒（较快）', 'imageBatchWaitMs', 2000],
-    ['单张图片下载上限：50 MB · 限制接收图片大小', '10 MB（较小图片）', 'imageMaxBytes', 10 * 1024 * 1024],
+    ['连发图片合并等待：8000 毫秒 · 微信连发多张图时凑成一批', '2 秒（较快）', 'imageBatchWaitMs', 2000],
+    ['单张图片下载上限：50 MB · 超过则拒绝下载', '10 MB（较小图片）', 'imageMaxBytes', 10 * 1024 * 1024],
   ] as const)('applies image preset without typing: %s', async (setting, preset, key, value) => {
     ctx.ui.input = vi.fn()
     ctx.ui.select.mockResolvedValueOnce('高级设置…').mockResolvedValueOnce(setting)
@@ -167,7 +167,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
   it.each([false, true])('cancels image selection without saving (custom=%s)', async custom => {
     const { saveConfig } = await import('../src/auth.js')
     ctx.ui.input = vi.fn().mockResolvedValue(undefined)
-    ctx.ui.select.mockResolvedValueOnce('高级设置…').mockResolvedValueOnce('单张图片下载上限：50 MB · 限制接收图片大小')
+    ctx.ui.select.mockResolvedValueOnce('高级设置…').mockResolvedValueOnce('单张图片下载上限：50 MB · 超过则拒绝下载')
       .mockResolvedValueOnce(custom ? '自定义…' : undefined)
       .mockResolvedValueOnce('返回常用设置').mockResolvedValueOnce(undefined)
     await command('config')
@@ -184,10 +184,10 @@ describe('bridge bidirectional sync and lifecycle', () => {
   it('does not change cached configuration when saving fails', async () => {
     const { saveConfig } = await import('../src/auth.js')
     vi.mocked(saveConfig).mockRejectedValueOnce(new Error('disk full'))
-    ctx.ui.select.mockResolvedValueOnce('双向同步：开启 · 同步电脑输入和回复').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
+    ctx.ui.select.mockResolvedValueOnce('双向同步：开启 · 电脑输入和 AI 回复也转发到微信').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
     await command('config')
     expect(state.config.bidirectionalSync).toBeUndefined()
-    expect(ctx.ui.select.mock.calls[2][1]).toContain('双向同步：开启 · 同步电脑输入和回复')
+    expect(ctx.ui.select.mock.calls[2][1]).toContain('双向同步：开启 · 电脑输入和 AI 回复也转发到微信')
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('配置未保存'), 'error')
   })
 
@@ -208,7 +208,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     let idle!: () => void
     ctx.isIdle.mockReturnValue(false)
     ctx.waitForIdle.mockImplementation(() => new Promise<void>(resolve => { idle = resolve }))
-    ctx.ui.select.mockResolvedValueOnce('微信来源与回复规则：开启 · 微信排版与文字提问').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
+    ctx.ui.select.mockResolvedValueOnce('微信消息标识与排版：开启 · 消息加 [微信] 标记，回复按微信风格').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
     const pending = command('config')
     await vi.waitFor(() => expect(ctx.waitForIdle).toHaveBeenCalled())
     expect(state.config.messageSourceTag).toBeUndefined()
@@ -218,7 +218,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
   })
 
   it('opens template viewing from settings without starting the bridge', async () => {
-    ctx.ui.select.mockResolvedValueOnce('回复模板：查看 / 导出 / 重载')
+    ctx.ui.select.mockResolvedValueOnce('回复模板：查看 / 导出 / 重载 · 约束 AI 回复微信的格式')
       .mockResolvedValueOnce('查看当前模板及路径').mockResolvedValueOnce(undefined)
     await command('config')
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('用户模板路径'), 'info')
