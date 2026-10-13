@@ -7,6 +7,12 @@
 <p align="center">在微信里继续你的 pi 对话。<br>Continue your pi conversation from WeChat.</p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/pi-wechat-assistant"><img src="https://img.shields.io/npm/v/pi-wechat-assistant?color=blue" alt="npm version"></a>
+  <a href="https://github.com/shenjiecode/pi-wechat-assistant/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D20.3-339933" alt="Node.js >=20.3">
+</p>
+
+<p align="center">
   <a href="#中文">中文</a> · <a href="#english">English</a> ·
   <a href="https://www.npmjs.com/package/pi-wechat-assistant">npm</a> ·
   <a href="https://pi.dev/packages/pi-wechat-assistant">pi.dev</a>
