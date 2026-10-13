@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Open interactive common/advanced settings with `/wechat config`, using host dialogs compatible with both Pi package generations. Keep `/wechat config show` and parameterized commands for text-only use. Include reply-template actions without starting the bridge.
+  `/wechat config` 使用兼容新旧 Pi 包的宿主窗口打开常用及高级设置；保留 `/wechat config show` 和带参数命令，提供回复模板操作，打开窗口不会启动桥接。
+- Document defaults, scope, and which settings belong in the UI versus files. Add explicit `config auto-start on|off` and `config remote-tools on|off` commands.
+  梳理默认值、生效范围及适合窗口或文件的配置项，增加显式的 `config auto-start on|off` 和 `config remote-tools on|off` 命令。
+
+- Show short explanations beside settings and offer image presets plus guided custom input; cancelling either step leaves settings unchanged.
+  配置列表直接显示简短用途；图片配置提供常用预设及带填写提示的自定义入口，取消任一步骤均不修改配置。
+
+### Fixed
+- Allow zero image batching delay and reject out-of-range numeric settings. Preserve previous configuration when a menu save fails.
+  允许图片合并等待设为零，拒绝超出范围的数值；窗口保存失败时保留原配置。
+
 ## [0.4.4] - 2026-10-14
 
 ### Added

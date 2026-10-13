@@ -24,6 +24,7 @@ import { QR_POLL_INTERVAL_MS, QR_MAX_REFRESH } from './constants.js'
 import type { WechatPrompt } from './wechat-prompt.js'
 import { WECHAT_SOURCE_TAG } from './wechat-source.js'
 import { describeBridgeLock } from './bridge-lock.js'
+import { showConfigMenu } from './config-menu.js'
 
 type Ctx = ExtensionContext | ExtensionCommandContext
 
@@ -248,10 +249,25 @@ async function cmdLogout(_args: string, ctx: Ctx, deps: CommandDeps): Promise<vo
 }
 
 async function cmdConfig(args: string, ctx: ExtensionCommandContext, deps: CommandDeps): Promise<void> {
+  try { await applyConfigCommand(args, ctx, deps) }
+  catch (error) { deps.notify('配置未保存: ' + formatError(error), 'error') }
+}
+
+async function applyConfigCommand(args: string, ctx: ExtensionCommandContext, deps: CommandDeps): Promise<void> {
   deps.setLatestCtx(ctx)
   const [key, value] = args.trim().split(/\s+/)
-  const config = await loadConfig()
-  if (!key) {
+  const config = { ...await loadConfig() }
+  if (!key && ctx.hasUI) {
+    await showConfigMenu(ctx, {
+      load: loadConfig,
+      apply: value => cmdConfig(value, ctx, deps),
+      prompt: action => cmdPrompt(action, ctx, deps),
+      imageWait: getImageBatchWaitMs,
+      imageMax: getImageMaxBytes,
+    })
+    return
+  }
+  if (!key || key === 'show') {
     deps.notify([
       `自动启动: ${config.autoStart ? '已开启' : '已关闭'}`,
       `双向同步: ${config.bidirectionalSync !== false ? '已开启（默认）' : '已关闭'}`,
@@ -289,8 +305,26 @@ async function cmdConfig(args: string, ctx: ExtensionCommandContext, deps: Comma
     deps.notify(`双向同步已${config.bidirectionalSync ? '开启' : '关闭'}`, 'info')
     return
   }
+  if (key === 'auto-start' || key === 'remote-tools') {
+    if (value !== 'on' && value !== 'off') { deps.notify(`用法: /wechat config ${key} on|off`, 'error'); return }
+    if (key === 'auto-start') config.autoStart = value === 'on'
+    else config.allowRemoteTools = value === 'on'
+    await saveConfig(config)
+    deps.notify(key === 'auto-start'
+      ? `新会话自动启动已${value === 'on' ? '开启' : '关闭'}，不改变当前桥接状态。`
+      : `微信端修改工具权限已${value === 'on' ? '开启' : '关闭'}。`, 'info')
+    return
+  }
+  if (key !== 'image-wait' && key !== 'image-max') {
+    deps.notify('未知配置项。支持: source, bidirectional, auto-start, remote-tools, image-wait, image-max', 'error')
+    return
+  }
   const numeric = Number(value)
-  if (!Number.isFinite(numeric) || numeric <= 0) { deps.notify('配置值必须是正数', 'error'); return }
+  if (!value || !Number.isFinite(numeric)
+    || (key === 'image-wait' ? numeric < 0 || numeric > 60_000 : numeric < 1 || !Number.isSafeInteger(Math.round(numeric * 1024 * 1024)))) {
+    deps.notify(key === 'image-wait' ? '图片合并等待须为 0–60000 毫秒。' : '图片下载上限须至少为 1 MB，且不能超过安全数值范围。', 'error')
+    return
+  }
   if (key === 'image-wait') {
     config.imageBatchWaitMs = Math.min(Math.max(Math.round(numeric), 0), 60_000)
   } else if (key === 'image-max') {
@@ -367,7 +401,8 @@ export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
         '/wechat prompt show       查看微信回复模板',
         '/wechat prompt init       创建用户模板（不覆盖已有文件）',
         '/wechat prompt reload     重新加载模板',
-        '/wechat config            查看/设置配置',
+        '/wechat config            打开设置窗口',
+        '/wechat config show       查看配置文本',
         '/wechat logout            清除凭证并停止',
         '/wechat autostart         开关自动启动',
         '/wechat remotetools       开关微信端 /tools 命令（默认禁用）',

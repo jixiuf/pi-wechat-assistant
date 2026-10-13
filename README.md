@@ -66,6 +66,8 @@ Then open WeChat, find the bot, and start messaging.
 
 Login credentials are shared account configuration and survive session restarts. Normally, run only `/wechat start` and `/wechat stop` in each session. `login --force` is an explicit recovery command; it is never invoked automatically. `logout` clears local credentials and context, rather than revoking the binding on the WeChat server.
 
+Use `/wechat config` for common settings, advanced image/tool options, and reply-template actions. Existing commands remain available. See [settings and defaults](docs/settings.md).
+
 Two-way synchronization is enabled by default: new TUI user messages and AI replies are forwarded to the bound WeChat user. Use `/wechat config bidirectional off` to forward only replies to WeChat-triggered tasks, or `on` to restore two-way sync. Existing conversation history is not replayed.
 
 `/wechat login` auto-starts the bridge in the current session after a successful login. After local startup checks, `/wechat start` offers cooperative handoff when the live owner advertises support: it requests a stop, waits up to 30 seconds for the old poller and in-flight sends to finish and release ownership, then acquires the lock exclusively. It does not cancel the old session’s AI task. Legacy owners (including 0.4.3), non-interactive starts, uncertain ownership, and timeouts require manual `/wechat stop` in the owning session; they never force takeover. A cancelled request cannot undo a stop the owner has already begun. The bridge restores cached reply context and sends the official startup/shutdown notifications. It attempts delivery even without cached context; if a contextual send is rejected with `ret=-2`, it retries once without context. This fallback does not guarantee delivery when WeChat requires fresh user activity: a persistent `ret=-2` rejection raises a one-time warning suggesting to send a message from WeChat first, `/wechat status` explains the remedy, and the footer keeps showing `发送失败` until a send succeeds. `/wechat status` distinguishes polling state, cached context, and the most recent send API result; cached context does not prove validity, and API success is not a read receipt.
@@ -83,7 +85,8 @@ All commands use `/wechat` with a subcommand:
 | `/wechat start` | Start the WeChat connection |
 | `/wechat stop` | Stop and release the lock |
 | `/wechat status` | Show connection status and config |
-| `/wechat config` | View bridge settings |
+| `/wechat config` | Open interactive settings (text output without UI) |
+| `/wechat config show` | Show settings as text |
 | `/wechat config source on\|off` | Toggle WeChat source and reply rules (default **on**) |
 | `/wechat prompt show` | View the reply template and override path |
 | `/wechat prompt init` | Export the default template without overwriting a user file |
@@ -259,6 +262,8 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 
 登录凭证属于共享的账号配置，跨会话保存。日常在会话里只需 `/wechat start`、`/wechat stop`；`login --force` 仅用于手动恢复，不会自动调用。`logout` 清除本地凭证和上下文，不等于在微信服务端解绑。
 
+执行 `/wechat config` 打开设置窗口，可修改常用设置、高级图片与工具选项，以及查看、导出、重载回复模板。原有命令继续可用。详见[配置项及默认值](docs/settings.md)。
+
 双向同步默认开启：新的电脑端用户输入和 AI 回复会同步给扫码绑定用户。执行 `/wechat config bidirectional off` 后仅发送微信任务的回复；执行 `/wechat config bidirectional on` 恢复双向同步。不会重发历史会话内容。
 
 `/wechat login` 登录成功后在当前会话自动启动桥接。`/wechat start` 先完成本地启动检查；若持锁会话支持交接协议，则弹窗确认后请求其停止，最多等待 30 秒，等旧轮询和进行中的发送结束并释放锁后再排他获取锁。不取消旧会话的 AI 任务。旧版（包括 0.4.3）、非交互启动、归属不明或超时都不会强行接管，需要在持锁会话手动 `/wechat stop`。取消请求不能撤销旧会话已经开始的停止操作。启动会恢复已保存的消息发送凭据（`context_token`），并调用官方上线通知；停止时调用下线通知。没有消息发送凭据也会尝试发送；携带该凭据发送被明确以 `ret=-2` 拒绝时，去掉该凭据重试一次。这个兜底不保证绕过微信侧需要新用户消息的限制：持续被 `ret=-2` 拒绝时会弹一次性警告，提示先从微信发送一条消息，`/wechat status` 也会说明补救方法，底部保持 `发送失败` 直到发送成功。`/wechat status` 分别显示登录凭据、轮询状态、消息发送凭据和最近发送接口结果：发送凭据已保存不代表仍有效，接口成功不代表已读。
@@ -274,7 +279,8 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 | `/wechat start` | 启动微信连接 |
 | `/wechat stop` | 停止并释放锁 |
 | `/wechat status` | 查看连接状态和配置 |
-| `/wechat config` | 查看桥接配置 |
+| `/wechat config` | 打开交互设置窗口（无 UI 时显示文本） |
+| `/wechat config show` | 查看配置文本 |
 | `/wechat config source on\|off` | 开关微信来源与回复约定（默认**开启**） |
 | `/wechat prompt show` | 查看回复模板及用户覆盖路径 |
 | `/wechat prompt init` | 导出默认模板，不覆盖已有用户文件 |

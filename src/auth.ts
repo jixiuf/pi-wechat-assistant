@@ -150,8 +150,8 @@ export async function loadConfig(): Promise<BridgeConfig> {
 }
 
 export async function saveConfig(config: BridgeConfig): Promise<void> {
-  _configCache = config
   await writeJsonFile(CONFIG_FILE, config)
+  _configCache = config
 }
 
 // --- 简单文件锁 ---
