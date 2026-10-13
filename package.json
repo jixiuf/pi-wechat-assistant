@@ -44,6 +44,7 @@
     "assets",
     "LICENSE",
     "README.md",
+    "README.en.md",
     "CHANGELOG.md"
   ],
   "pi": {
