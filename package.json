@@ -1,8 +1,8 @@
 {
   "name": "pi-wechat-assistant",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "type": "module",
-  "description": "微信作为 pi TUI 的移动端分身 — 通过微信远程与 pi 交互",
+  "description": "在微信里继续 pi 对话：双向同步、图片与文件、会话交接。 Continue pi conversations from WeChat.",
   "main": "index.ts",
   "license": "MIT",
   "author": "sj",

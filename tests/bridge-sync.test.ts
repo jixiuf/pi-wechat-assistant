@@ -120,7 +120,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     ctx.ui.select.mockResolvedValueOnce(undefined)
     await command('config')
     expect(ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining('微信设置'), expect.arrayContaining([
-      '双向同步：开启 · 电脑输入和 AI 回复也转发到微信', '自动启动微信桥接：关闭 · 每次打开 pi 都自动连接微信', '微信消息标识与排版：开启 · 消息加 [微信] 标记，回复按微信风格',
+      '双向同步：开启 · 电脑输入和 AI 回复也转发到微信', '自动启动微信桥接：关闭 · 打开 pi 时尝试连接微信', '微信消息标识与排版：开启 · 消息加来源标记，回复按微信风格',
     ]))
     expect(registeredTools.size).toBe(0)
     expect(await handlers.before_agent_start({ systemPrompt: 'base', prompt: 'local' }, ctx)).toBeUndefined()
@@ -208,7 +208,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     let idle!: () => void
     ctx.isIdle.mockReturnValue(false)
     ctx.waitForIdle.mockImplementation(() => new Promise<void>(resolve => { idle = resolve }))
-    ctx.ui.select.mockResolvedValueOnce('微信消息标识与排版：开启 · 消息加 [微信] 标记，回复按微信风格').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
+    ctx.ui.select.mockResolvedValueOnce('微信消息标识与排版：开启 · 消息加来源标记，回复按微信风格').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
     const pending = command('config')
     await vi.waitFor(() => expect(ctx.waitForIdle).toHaveBeenCalled())
     expect(state.config.messageSourceTag).toBeUndefined()

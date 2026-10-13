@@ -22,8 +22,8 @@ export async function showConfigMenu(ctx: ExtensionCommandContext, deps: ConfigM
       { id: 'back', label: '返回常用设置' },
     ] : [
       { id: 'bidirectional', label: `双向同步：${enabled(config.bidirectionalSync !== false)} · 电脑输入和 AI 回复也转发到微信` },
-      { id: 'auto-start', label: `自动启动微信桥接：${enabled(config.autoStart === true)} · 每次打开 pi 都自动连接微信` },
-      { id: 'source', label: `微信消息标识与排版：${enabled(config.messageSourceTag?.enabled !== false)} · 消息加 [微信] 标记，回复按微信风格` },
+      { id: 'auto-start', label: `自动启动微信桥接：${enabled(config.autoStart === true)} · 打开 pi 时尝试连接微信` },
+      { id: 'source', label: `微信消息标识与排版：${enabled(config.messageSourceTag?.enabled !== false)} · 消息加来源标记，回复按微信风格` },
       { id: 'prompt', label: '回复模板：查看 / 导出 / 重载 · 约束 AI 回复微信的格式' },
       { id: 'advanced', label: '高级设置…' },
       { id: 'close', label: '关闭' },
@@ -71,8 +71,8 @@ export async function showConfigMenu(ctx: ExtensionCommandContext, deps: ConfigM
     }
     const descriptions: Record<string, string> = {
       bidirectional: '双向同步：把电脑端的输入和 AI 回复转发给微信；关闭后只有微信发起的任务回复才发回微信',
-      'auto-start': '自动启动微信桥接：每次打开 pi 会话时自动连接微信；不会接管其他会话已持有的桥接',
-      source: '微信消息标识与排版：微信消息加 [微信] 标记，AI 改用微信友好格式（短段落、代码分块），并阻止本机弹窗提问',
+      'auto-start': '自动启动微信桥接：打开 pi 会话时尝试连接微信；不会接管其他会话已持有的桥接',
+      source: '微信消息标识与排版：微信消息加来源标记（默认 [微信]），引导 AI 用短段落和文字提问，并拦截已配置的本机提问工具',
       'remote-tools': '允许微信端 /tools 命令修改本机工具权限，默认关闭',
     }
     const choice = await ctx.ui.select(descriptions[id], ['开启', '关闭'])

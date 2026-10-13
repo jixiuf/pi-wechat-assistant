@@ -66,8 +66,6 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 | `/wechat login --force` | Scan again when login credentials expire |
 | `/wechat logout` | Stop and clear local login credentials |
 
-> Settings dialogs are implemented in the current source but are not yet included in npm 0.4.4. Version 0.4.4 supports parameterized configuration commands.
-
 Send `/help` in WeChat for remote commands, including `/status`, `/model`, and `/stop`. **WeChat `/stop` cancels the AI task; TUI `/wechat stop` stops the bridge.**
 
 Settings and the optional reply template live in `~/.pi/agent/wechat-assistant/`. While running, the bridge adds fixed, conditional WeChat system rules; incoming messages carry only the `[微信]` source marker.

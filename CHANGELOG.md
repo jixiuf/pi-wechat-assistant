@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-10-14
 
 ### Added
 - Open interactive common/advanced settings with `/wechat config`, using host dialogs compatible with both Pi package generations. Keep `/wechat config show` and parameterized commands for text-only use. Include reply-template actions without starting the bridge.
@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Allow zero image batching delay and reject out-of-range numeric settings. Preserve previous configuration when a menu save fails.
   允许图片合并等待设为零，拒绝超出范围的数值；窗口保存失败时保留原配置。
+
+### Changed
+- Simplify the README into Chinese and English pages with language links; add the project logo, cover image, and Pi gallery image metadata. Update the package description.
+  README 精简为可切换的中英文页面，加入项目 logo、主图和 Pi 扩展展示图配置，更新包描述。
+- Explain settings by their effects, with current values, presets, and guided custom input. The maintainer has verified the settings changes.
+  设置说明改为直接解释操作效果，显示当前值、常用预设及自定义填写提示；维护者已验证设置改动。
 
 ## [0.4.4] - 2026-10-14
 

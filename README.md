@@ -66,8 +66,6 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 | `/wechat login --force` | 登录凭据失效时重新扫码 |
 | `/wechat logout` | 停止桥接并清除本地登录凭据 |
 
-> 配置窗口已在当前源码实现，尚未包含在 npm 0.4.4 中；0.4.4 可使用带参数的配置命令。
-
 微信里输入 `/help` 查看远程命令。常用的有 `/status`、`/model` 和 `/stop`；其中 **微信 `/stop` 取消当前 AI 任务，电脑端 `/wechat stop` 停止桥接**。
 
 配置及可选回复模板位于 `~/.pi/agent/wechat-assistant/`。运行期间加入固定的条件式微信系统规则，微信消息本身只附 `[微信]` 来源标识。
@@ -83,7 +81,6 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 - 仅接收扫码绑定用户的消息。微信 `/tools` 默认关闭；发送工具只允许项目目录内的文件，单个发送文件上限 50 MB。
 
 已完成 Windows 开发测试及 Linux 双会话交接验证；API 类型兼容检查覆盖 pi 0.73.1、0.78.0、0.84.0、0.84.4、0.99.2、1.1.0、1.2.0。
-
 
 ---
 
