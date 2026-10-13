@@ -10,7 +10,7 @@ This controls current tool availability, not model memory: earlier conversation/
 
 After a started bridge stops, the `context` hook adds one temporary “sending tools unavailable” notice to each model request. It does not write to session history or the system prompt and does not trigger a turn. Restart removes this notice from subsequent model contexts; an extension that has never started adds no notice. Repeated context processing replaces the notice instead of accumulating copies.
 
-`/wechat start` and `/wechat status` report the owner of the shared bridge lock. If another live process holds it, switch to that session, or run `/wechat stop` there before starting here. The PID probe proves only that the lock owner exists, not that it is polling successfully. Missing locks and confirmed exited processes permit starting; malformed/unreadable locks and permission/probe failures remain uncertain and are not overwritten automatically. These diagnostics do not provide cross-process message forwarding.
+`/wechat start` and `/wechat status` report the owner of the shared bridge lock. If another live process holds it and supports handoff (0.4.4+), interactive `/wechat start` offers confirmation and waits up to 30 seconds for it to stop and release the lock. Older owners require `/wechat stop` in their session. Timeout or uncertain ownership never forces takeover. The PID probe proves only that the lock owner exists, not that it is polling successfully. Missing locks and confirmed exited processes permit starting; malformed/unreadable locks and permission/probe failures remain uncertain and are not overwritten automatically. These diagnostics do not provide cross-process message forwarding.
 
 Verified against published Pi APIs 0.73.1, 0.78.0, 0.84.0, 0.84.4, 0.99.2, 1.1.0, and 1.2.0. See the [legacy dynamic-tool example](https://github.com/earendil-works/pi/blob/v0.73.1/packages/coding-agent/examples/extensions/dynamic-tools.ts) and [modern tool exposure contract](https://github.com/earendil-works/pi/blob/v1.2.0/packages/coding-agent/src/core/extensions/types.ts).
 
@@ -89,7 +89,7 @@ References: [Pi 1.2.0 extension contracts](https://github.com/earendil-works/pi/
 
 桥接启动过再停止后，`context` 事件会为每次模型请求临时添加一条“发送工具不可用”的说明，不写入会话历史或系统提示词，也不触发新任务。再次启动会从后续模型上下文中移除这条说明；从未启动过的扩展不添加说明。重复处理上下文时替换旧说明，不累积多条。
 
-`/wechat start` 和 `/wechat status` 会说明共享桥接锁的归属。其他存活进程持锁时，请切换到对应会话，或先在那里执行 `/wechat stop`，再在当前会话启动。PID 存活只说明持锁进程存在，不证明它正在正常轮询。未发现锁或确认原进程退出时允许启动；锁内容损坏、不可读、权限不足或无法探测时保持“无法确认”，不自动覆盖。这项诊断不提供跨进程消息转发。
+`/wechat start` 和 `/wechat status` 会说明共享桥接锁的归属。其他存活进程持锁且支持交接（0.4.4+）时，交互式 `/wechat start` 会请求确认，最多等待 30 秒让旧桥接停止并释放锁。旧版需在原会话执行 `/wechat stop`；超时或归属不明时不强行接管。PID 存活只说明持锁进程存在，不证明它正在正常轮询。未发现锁或确认原进程退出时允许启动；锁内容损坏、不可读、权限不足或无法探测时保持“无法确认”，不自动覆盖。这项诊断不提供跨进程消息转发。
 
 已针对 Pi 0.73.1、0.78.0、0.84.0、0.84.4、0.99.2、1.1.0、1.2.0 的发布 API 检查兼容性；官方动态工具示例与新版工具可见性契约链接见英文部分。
 

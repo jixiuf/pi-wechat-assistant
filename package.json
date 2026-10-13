@@ -41,11 +41,13 @@
     "src",
     "prompts",
     "docs",
+    "assets",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"
   ],
   "pi": {
+    "image": "https://raw.githubusercontent.com/shenjiecode/pi-wechat-assistant/main/assets/cover.png",
     "extensions": [
       "./index.ts"
     ],
