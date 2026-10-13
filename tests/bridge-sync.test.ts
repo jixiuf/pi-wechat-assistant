@@ -172,14 +172,35 @@ describe('bridge bidirectional sync and lifecycle', () => {
     modern()
     await command('start')
     await wechatInput('work', true)
+    if (mode === 'retry-cancel-before-boundary') {
+      // 0.99.2 skipped the boundary after a cancel during retry backoff; an
+      // earlier normal settlement already latched this host as boundary-capable.
+      await reply('warmup')
+      await settle('completed')
+      state.client.sendText.mockClear()
+      await failure()
+      await handlers.agent_settled({}, ctx) // 0.99.2 has no aborted field
+      expect(outgoing()).toEqual([])
+      return
+    }
     const abort = new AbortController()
     ctx.signal = abort.signal
     await failure()
     if (mode === 'aborted-message') await handlers.message_end({ message: { role: 'assistant', stopReason: 'aborted', content: [] } }, ctx)
     if (mode === 'aborted-signal') abort.abort()
-    if (mode === 'retry-cancel-before-boundary') await handlers.agent_settled({}, ctx) // 0.99.2 has no aborted field
     else await settle(mode === 'aborted-message' ? 'aborted' : 'error', mode === 'aborted-settlement')
     expect(outgoing()).toEqual([])
+  })
+
+  it('notifies at settlement on hosts that never emit the boundary event (Pi 0.84.x)', async () => {
+    modern() // isProjectTrusted present, so the probe selects the settled path…
+    await command('start')
+    await wechatInput('work', true)
+    await failure('401 invalid api key')
+    await handlers.agent_end({ messages: [] }, ctx)
+    await handlers.agent_settled({}, ctx) // …but the host has no agent_before_settle
+    expect(outgoing()).toEqual([['bound-user', expect.stringContaining('401 invalid api key')]])
+    expect(outgoing()[0][1]).toContain('自动处理已结束')
   })
 
   it('does not infer model failure from keywords, tool errors, history, or silence', async () => {

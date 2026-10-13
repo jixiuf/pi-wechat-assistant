@@ -25,12 +25,22 @@ describe('structured model failure notices', () => {
     failure.observe({ stopReason: 'error', errorMessage: 'quota again' })
     expect(failure.take(false)).not.toBeNull()
   })
-  it('requires a terminal error boundary and honors a subsequently aborted signal', () => {
+  it('notifies at settlement on hosts without a boundary event and suppresses recovered retries', () => {
     const failure = new ModelFailureNotice()
     const abort = new AbortController()
     failure.observe({ stopReason: 'error', errorMessage: 'quota' }, abort.signal)
+    // A host that never emits agent_before_settle (e.g. Pi 0.84.x) still settles
+    // with the observed error, so the settlement notifies.
+    expect(failure.take(true)).toContain('自动处理已结束')
+    failure.reset()
+    // Once a boundary event is seen, the host is treated as capable: a
+    // non-error boundary means the retry recovered.
+    failure.beforeSettle('completed')
+    failure.observe({ stopReason: 'error', errorMessage: 'quota' }, abort.signal)
     expect(failure.take(true)).toBeNull()
+    failure.reset()
     failure.beforeSettle('error')
+    failure.observe({ stopReason: 'error', errorMessage: 'quota' }, abort.signal)
     abort.abort()
     expect(failure.take(true)).toBeNull()
   })

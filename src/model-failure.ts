@@ -26,6 +26,8 @@ export class ModelFailureNotice {
   private error: string | null = null
   private notified = false
   private boundaryError = false
+  /** Latched per host: true once any agent_before_settle event is observed. */
+  private boundarySeen = false
   private signal: AbortSignal | undefined
 
   reset(): void {
@@ -45,10 +47,18 @@ export class ModelFailureNotice {
       ? summarizeModelError(message.errorMessage) : null
   }
 
-  beforeSettle(outcome: string): void { this.boundaryError = outcome === 'error' }
+  beforeSettle(outcome: string): void {
+    this.boundarySeen = true
+    this.boundaryError = outcome === 'error'
+  }
 
   take(final: boolean, aborted = false): string | null {
-    if (!this.error || this.notified || aborted || this.signal?.aborted || (final && !this.boundaryError)) return null
+    if (!this.error || this.notified || aborted || this.signal?.aborted) return null
+    // On hosts that emit the boundary event, a non-error boundary means an
+    // automatic retry recovered; suppress. Hosts that never emit it (Pi 0.84.x
+    // has agent_settled but no agent_before_settle) settle with the observed
+    // error, so the settlement itself confirms the failure.
+    if (final && !this.boundaryError && this.boundarySeen) return null
     // Claim before awaiting transport; do not duplicate on a repeated event or ambiguous send failure.
     this.notified = true
     return final
