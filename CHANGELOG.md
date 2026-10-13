@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Report structured model failures and missing model/auth startup configuration to WeChat (#11, related to PR #9). Modern Pi waits for final settlement; legacy Pi reports one failed attempt without claiming retries have stopped. Preserve request routing through retries and suppress historical errors, cancellation, and duplicate notices.
+  将结构化模型错误及缺少模型/认证配置的启动错误通知微信（#11，相关 PR #9）。新版 Pi 等待最终结束，旧版每条请求只提示一次失败且不误称重试已停止；重试期间保留来源，避免历史错误、取消和重复通知。
+
 ## [0.4.1] - 2026-10-13
 
 ### Fixed

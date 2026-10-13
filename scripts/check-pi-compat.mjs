@@ -60,12 +60,15 @@ for (const version of selected.length ? selected : versions) {
   // All imports are type-only. Check the same extension against each host's API.
   paths['@mariozechner/pi-coding-agent'] = paths[`${scope}/pi-coding-agent`]
   const sentinelPath = path.join(cache, `typed-api-${version}.ts`)
-  await fs.writeFile(sentinelPath, `import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent'
+  await fs.writeFile(sentinelPath, `import type { ExtensionAPI, ExtensionContext, ExtensionEvent } from '@mariozechner/pi-coding-agent'
 type IsAny<T> = 0 extends (1 & T) ? true : false
 const apiIsTyped: IsAny<ExtensionAPI> = false
 const contextIsTyped: IsAny<ExtensionContext> = false
 const toolsAreTyped: IsAny<Parameters<ExtensionAPI['registerTool']>[0]> = false
 const messagesAreTyped: IsAny<Parameters<ExtensionAPI['sendUserMessage']>[0]> = false
+type HasSettledEvent = Extract<ExtensionEvent, { type: 'agent_settled' }> extends never ? false : true
+type HasProjectTrust = 'isProjectTrusted' extends keyof ExtensionContext ? true : false
+const settlementCapabilityMatches: HasProjectTrust extends HasSettledEvent ? true : false = true
 `)
   const configPath = path.join(cache, `tsconfig-${version}.json`)
   await fs.writeFile(configPath, JSON.stringify({

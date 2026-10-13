@@ -28,6 +28,7 @@ import type { IncomingMessage } from './types.js'
 import { WechatPrompt } from './wechat-prompt.js'
 import { appendWechatSystemRules, WECHAT_SOURCE_TAG } from './wechat-source.js'
 import { formatWechatStatus } from './status.js'
+import { ModelFailureNotice, hasSettledEvents, summarizeModelError } from './model-failure.js'
 
 const WECHAT_TOOL_NAMES = ['send_file_to_wechat', 'send_image_to_wechat']
 
@@ -117,6 +118,7 @@ function guardFileSize(resolvedPath: string): ReturnType<typeof fail> | null {
 // ============================================================================
 
 export default function wechatAssistant(pi: ExtensionAPI) {
+  const modelFailure = new ModelFailureNotice()
   let client: WeixinClient | null = null
   let running = false
   let agentIdle = true
@@ -214,6 +216,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   async function stopBridge(options: { releaseLock?: boolean } = {}): Promise<void> {
     const wasRunning = running
     running = false
+    modelFailure.reset()
     wechatPrompt.clear()
     if (toolsRegistered) {
       const active = pi.getActiveTools()
@@ -452,9 +455,41 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   })
 
   // Input may be queued: do not change the running reply's source here.
-  pi.on('input', (event, ctx) => {
+  pi.on('input', async (event, ctx) => {
     latestCtx = ctx
-    if (running) queue.observeInput(event.text, event.images, event.source)
+    if (!running) return
+    const request = queue.observeInput(event.text, event.images, event.source)
+    if (!request || !ctx.isIdle()) return
+    const requestClient = client
+    const requestSignal = pollAbort?.signal
+    // sendUserMessage() returns void and Pi reports pre-run rejections only to its UI.
+    // Check public model/auth state for our idle inputs; do not inspect credentials.
+    let problem: string | undefined
+    const model = ctx.model
+    if (!model) problem = '尚未选择模型，请在 Pi 中选择模型后重新发送。'
+    else if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
+      if (!hasSettledEvents(ctx)) problem = '当前模型未配置可用的认证信息，请在 Pi 中检查模型配置或重新登录。'
+      else {
+        // New hosts can resolve auth lazily; a false synchronous snapshot is not a failure.
+        try {
+          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model)
+          if (!auth.ok) problem = summarizeModelError(auth.error)
+        } catch (error) { problem = summarizeModelError(formatError(error)) }
+      }
+    }
+    if (!running || !queue.hasSubmittedRequest(request)) return { action: 'handled' as const }
+    if (!problem || ctx.model !== model) return
+    queue.discardSubmittedRequest(request)
+    await requestClient?.stopTyping(request.userId).catch(() => {})
+    try {
+      if (running && !requestSignal?.aborted && client === requestClient) {
+        await requestClient?.sendText(request.userId, `⚠️ 无法开始模型请求：${problem}`)
+      }
+    }
+    catch (error) { log(`模型启动错误通知发送失败: ${formatError(error)}`) }
+    updateStatusBar()
+    setImmediate(() => void queue.drain())
+    return { action: 'handled' as const }
   })
 
   pi.on('message_start', async (event, ctx) => {
@@ -462,6 +497,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (event.message.role !== 'user') return
     const previous = queue.activeRequest
     const request = running ? queue.consumeSubmittedRequest(event.message.content) : null
+    modelFailure.reset()
     queue.activeRequest = request
     if (previous && previous !== request) void client?.stopTyping(previous.userId).catch(() => {})
     turn.wechatConversationActive = request !== null
@@ -489,6 +525,10 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   pi.on('before_agent_start', (event, ctx) => {
     latestCtx = ctx
     agentPreparing = true
+    modelFailure.reset()
+    turn.wechatConversationActive = false
+    turn.targetUser = null
+    queue.activeRequest = null
     const source = getConfigCache().messageSourceTag
     if (!running || source?.enabled === false || wechatPrompt.rules === null) return
     return {
@@ -519,9 +559,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     turn.messages = null
     turn.ended = false
 
-    // message_start selects the request, including follow-ups inside this run.
-    turn.wechatConversationActive = false
-    turn.targetUser = null
+    // Retry loops have no new user message; retain its source and question guard.
+    modelFailure.startAttempt()
     setImmediate(() => void queue.drain())
   })
 
@@ -529,6 +568,12 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   pi.on('message_end', async (event, ctx) => {
     if (event.message.role !== 'assistant') return
     if (!running || !client) return
+    modelFailure.observe(event.message, ctx.signal)
+    if (event.message.stopReason === 'error' || event.message.stopReason === 'aborted') {
+      // Never forward failed partial output: retries may replay it.
+      if (!hasSettledEvents(ctx) && event.message.stopReason === 'error') await sendModelFailure(false)
+      return
+    }
     if (!turn.wechatConversationActive && getConfigCache().bidirectionalSync === false) return
 
     const targetUserId = turn.targetUser ?? client.userId
@@ -574,12 +619,37 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
     if (queue.activeRequest) {
       await client?.stopTyping(queue.activeRequest.userId).catch(() => {})
-      queue.activeRequest = null
     }
     updateStatusBar()
 
     log(`[AGENT-END-DEFER] deferring drainQueue`)
     setImmediate(() => void queue.drain())
+  })
+
+  async function sendModelFailure(final: boolean, aborted = false): Promise<void> {
+    if (!running || !client || !turn.targetUser) return
+    if (!turn.wechatConversationActive && getConfigCache().bidirectionalSync === false) return
+    const notice = modelFailure.take(final, aborted)
+    if (!notice) return
+    try { await client.sendText(turn.targetUser, notice) }
+    catch (error) { log(`模型错误通知发送失败: ${formatError(error)}`) }
+  }
+
+  // Old loaders accept unknown event registrations but never dispatch them.
+  // Keep the optional-event cast isolated; the API matrix checks the capability probe.
+  const onSettlement = pi.on as unknown as (
+    name: 'agent_before_settle' | 'agent_settled',
+    handler: (event: { outcome?: string; aborted?: boolean }, ctx: ExtensionContext) => void | Promise<void>,
+  ) => unknown
+  onSettlement('agent_before_settle', event => { modelFailure.beforeSettle(event.outcome ?? '') })
+  onSettlement('agent_settled', async (event, ctx) => {
+    latestCtx = ctx
+    const sending = sendModelFailure(true, event.aborted === true)
+    modelFailure.reset()
+    queue.activeRequest = null
+    turn.wechatConversationActive = false
+    turn.targetUser = null
+    await sending
   })
 
   // 会话关闭 → 清理 + 落盘 context tokens

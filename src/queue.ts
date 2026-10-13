@@ -452,13 +452,26 @@ export class MessageQueue {
   }
 
   /** Input origin is useful only together with a matching bridge submission. */
-  observeInput(text: string, images: unknown[] | undefined, source: string): void {
+  observeInput(text: string, images: unknown[] | undefined, source: string): QueuedMessage | undefined {
     const key = contentKey([{ type: 'text', text }, ...(images ?? [])])
     const submitted = source === 'extension'
       ? this.submittedRequests.find(item => item.key === key && !item.inputObserved)
       : undefined
     if (submitted) submitted.inputObserved = true
     this.inputSources.push({ key, request: submitted?.request ?? null })
+    return submitted?.request
+  }
+
+  /** Also identifies stale asynchronous input checks after a bridge reset. */
+  hasSubmittedRequest(request: QueuedMessage): boolean {
+    return this.submittedRequests.some(item => item.request === request)
+  }
+
+  /** Drop a bridge input rejected before Pi starts a run (no lifecycle events follow). */
+  discardSubmittedRequest(request: QueuedMessage): void {
+    this.submittedRequests = this.submittedRequests.filter(item => item.request !== request)
+    this.inputSources = this.inputSources.filter(item => item.request !== request)
+    if (this.pendingInjection === request) this.pendingInjection = null
   }
 
   /** Match only this bridge's submissions, when Pi actually consumes the message. */

@@ -63,6 +63,8 @@ describe('bridge bidirectional sync and lifecycle', () => {
     sendUserMessage = vi.fn()
     ctx = {
       cwd: process.cwd(), hasUI: true, isIdle: vi.fn(() => true), waitForIdle: vi.fn(),
+      model: { provider: 'test', id: 'test-model' },
+      modelRegistry: { hasConfiguredAuth: vi.fn(() => true), getApiKeyAndHeaders: vi.fn() },
       ui: { notify: vi.fn(), setStatus: vi.fn() },
     }
     oldListeners = new Map(['SIGINT', 'SIGTERM', 'beforeExit'].map(name => [name, process.listeners(name)]))
@@ -113,6 +115,230 @@ describe('bridge bidirectional sync and lifecycle', () => {
     return content
   }
   const reply = (text: string) => handlers.message_end({ message: { role: 'assistant', content: text } }, ctx)
+
+  const outgoing = () => state.client.sendText.mock.calls.filter(([, text]) => !text.startsWith('✅ 已收到'))
+  const failure = (errorMessage = 'quota exceeded', content: unknown = []) => handlers.message_end({
+    message: { role: 'assistant', stopReason: 'error', errorMessage, content },
+  }, ctx)
+  const settle = async (outcome = 'error', aborted = false) => {
+    await handlers.agent_before_settle({ outcome }, ctx)
+    await handlers.agent_settled({ aborted }, ctx)
+  }
+  const modern = () => { ctx.isProjectTrusted = () => ({}) }
+
+  it('notifies modern hosts only at final settlement, even after progress, and never replays history', async () => {
+    modern()
+    await command('start')
+    await wechatInput('work', true)
+    await reply('working')
+    state.client.sendText.mockClear()
+    await failure('quota exceeded', 'partial response that a retry might repeat')
+    await handlers.agent_end({ messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'old error' }] }, ctx)
+    expect(outgoing()).toEqual([])
+    await settle()
+    expect(outgoing()).toEqual([['bound-user', expect.stringContaining('quota exceeded')]])
+    expect(outgoing()[0][1]).toContain('自动处理已结束')
+    await settle()
+    expect(outgoing()).toHaveLength(1)
+  })
+
+  it('keeps WeChat routing and question guards across retries, and suppresses recovered errors', async () => {
+    modern()
+    state.config.bidirectionalSync = false
+    await command('start')
+    await wechatInput('work', true)
+    await failure()
+    await handlers.agent_end({ messages: [] }, ctx)
+    await handlers.agent_start({}, ctx)
+    expect(handlers.tool_call({ toolName: 'question' }, ctx)?.block).toBe(true)
+    await reply('recovered')
+    await settle('completed')
+    expect(outgoing()).toEqual([['bound-user', 'recovered']])
+  })
+
+  it('reports only the last failed attempt after modern retry exhaustion', async () => {
+    modern()
+    await command('start')
+    await wechatInput('work', true)
+    await failure('temporary failure')
+    await handlers.agent_end({ messages: [] }, ctx)
+    await handlers.agent_start({}, ctx)
+    await failure('final failure')
+    await settle()
+    expect(outgoing()).toEqual([['bound-user', expect.stringContaining('final failure')]])
+  })
+
+  it.each(['aborted-message', 'aborted-settlement', 'retry-cancel-before-boundary', 'aborted-signal'])('does not report user cancellation: %s', async mode => {
+    modern()
+    await command('start')
+    await wechatInput('work', true)
+    const abort = new AbortController()
+    ctx.signal = abort.signal
+    await failure()
+    if (mode === 'aborted-message') await handlers.message_end({ message: { role: 'assistant', stopReason: 'aborted', content: [] } }, ctx)
+    if (mode === 'aborted-signal') abort.abort()
+    if (mode === 'retry-cancel-before-boundary') await handlers.agent_settled({}, ctx) // 0.99.2 has no aborted field
+    else await settle(mode === 'aborted-message' ? 'aborted' : 'error', mode === 'aborted-settlement')
+    expect(outgoing()).toEqual([])
+  })
+
+  it('does not infer model failure from keywords, tool errors, history, or silence', async () => {
+    modern()
+    await command('start')
+    await wechatInput('work', true)
+    await reply('error failed aborted: these are example words')
+    state.client.sendText.mockClear()
+    await handlers.message_end({ message: { role: 'toolResult', isError: true, content: 'failed' } }, ctx)
+    await handlers.agent_end({ messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'historic failure' }] }, ctx)
+    await settle('completed')
+    expect(outgoing()).toEqual([])
+  })
+
+  it('sends one factual legacy attempt notice despite retries and repeated events', async () => {
+    await command('start')
+    await wechatInput('work', true)
+    await failure()
+    await handlers.agent_end({ messages: [] }, ctx)
+    await handlers.agent_start({}, ctx)
+    await failure()
+    expect(outgoing()).toEqual([['bound-user', expect.stringContaining('Pi 可能自动重试')]])
+    await reply('recovered')
+    await wechatInput('second request')
+    await failure()
+    expect(outgoing()).toHaveLength(3)
+  })
+
+  it('does not retry an error notification after an ambiguous send rejection', async () => {
+    await command('start')
+    await wechatInput('work', true)
+    state.client.sendText.mockRejectedValueOnce(new Error('connection lost'))
+    await failure()
+    await failure()
+    expect(outgoing()).toHaveLength(1)
+  })
+
+  it.each([false, true])('respects TUI bidirectional sync=%s for failures and clears the old WeChat source', async enabled => {
+    modern()
+    state.config.bidirectionalSync = enabled
+    await command('start')
+    await wechatInput('wechat', true)
+    await failure('wechat error')
+    await startRun('new TUI request')
+    state.client.sendText.mockClear()
+    await failure('TUI error')
+    await settle()
+    expect(outgoing()).toHaveLength(enabled ? 1 : 0)
+    if (enabled) expect(outgoing()[0][1]).toContain('TUI error')
+  })
+
+  it('drops pending notices when stopped', async () => {
+    modern()
+    await command('start')
+    await wechatInput('work', true)
+    await failure()
+    await command('stop')
+    await settle()
+    expect(outgoing()).toEqual([])
+  })
+
+  it('reports actual WeChat failures with the source marker disabled', async () => {
+    modern()
+    state.config.messageSourceTag = { enabled: false }
+    state.config.bidirectionalSync = false
+    await command('start')
+    await wechatInput('work', true)
+    await failure()
+    await settle()
+    expect(outgoing()).toEqual([['bound-user', expect.stringContaining('quota exceeded')]])
+  })
+
+  it('does not clear a new request while the previous settlement notification is sending', async () => {
+    modern()
+    state.config.bidirectionalSync = false
+    await command('start')
+    await wechatInput('first', true)
+    await failure()
+    let resolve!: () => void
+    state.client.sendText.mockImplementationOnce(() => new Promise<void>(done => { resolve = done }))
+    await handlers.agent_before_settle({ outcome: 'error' }, ctx)
+    const sending = handlers.agent_settled({}, ctx)
+    await wechatInput('second')
+    resolve()
+    await sending
+    await reply('second answer')
+    expect(outgoing()).toHaveLength(2)
+    expect(outgoing()[1]).toEqual(['bound-user', 'second answer'])
+  })
+
+  it('never rejects TUI or unrelated extension input during startup checks', async () => {
+    await command('start')
+    ctx.model = undefined
+    for (const source of ['interactive', 'extension']) {
+      expect(await handlers.input({ source, text: 'unrelated' }, ctx)).toBeUndefined()
+    }
+    expect(outgoing()).toEqual([])
+  })
+
+  it('does not reject busy follow-ups based on a transient model/auth snapshot', async () => {
+    await command('start')
+    ctx.isIdle.mockReturnValue(false)
+    ctx.model = undefined
+    await wechatInput('queued request')
+    expect(outgoing()).toEqual([])
+  })
+
+  // Emulate Pi invoking input while sendUserMessage is delivering an idle request.
+  async function deliverIdleInput() {
+    let result: any
+    sendUserMessage.mockImplementationOnce(async (content: unknown) => {
+      result = await handlers.input({ source: 'extension', text: extractTextFromMessageContent(content) }, ctx)
+    })
+    state.queue.enqueue({ messageId: 'preflight', userId: 'bound-user', text: 'work', type: 'text', imageUrls: [],
+      raw: { from_user_id: 'bound-user' }, contextToken: '', timestamp: new Date() })
+    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalled())
+    return () => result
+  }
+
+  it.each(['no-model', 'legacy-auth', 'modern-auth'])('reports idle startup rejection without waiting for nonexistent lifecycle events: %s', async mode => {
+    await command('start')
+    if (mode === 'no-model') ctx.model = undefined
+    else {
+      ctx.modelRegistry.hasConfiguredAuth.mockReturnValue(false)
+      if (mode === 'modern-auth') {
+        modern()
+        ctx.modelRegistry.getApiKeyAndHeaders.mockResolvedValue({ ok: false, error: 'auth unavailable' })
+      }
+    }
+    const result = await deliverIdleInput()
+    await vi.waitFor(() => expect(result()).toEqual({ action: 'handled' }))
+    expect(outgoing()).toEqual([['bound-user', expect.stringContaining('无法开始模型请求')]])
+    expect(state.queue.pendingInjection).toBeNull()
+  })
+
+  it('allows lazy modern authentication rather than treating the synchronous snapshot as failure', async () => {
+    modern()
+    await command('start')
+    ctx.modelRegistry.hasConfiguredAuth.mockReturnValue(false)
+    ctx.modelRegistry.getApiKeyAndHeaders.mockResolvedValue({ ok: true, apiKey: 'test' })
+    await deliverIdleInput()
+    await vi.waitFor(() => expect(ctx.modelRegistry.getApiKeyAndHeaders).toHaveBeenCalled())
+    expect(outgoing()).toEqual([])
+    expect(state.queue.pendingInjection).not.toBeNull()
+  })
+
+  it('does not deliver stale asynchronous auth errors after stopping and restarting', async () => {
+    modern()
+    await command('start')
+    ctx.modelRegistry.hasConfiguredAuth.mockReturnValue(false)
+    let resolve!: (value: unknown) => void
+    ctx.modelRegistry.getApiKeyAndHeaders.mockReturnValue(new Promise(done => { resolve = done }))
+    const result = await deliverIdleInput()
+    await command('stop')
+    await command('start')
+    resolve({ ok: false, error: 'stale auth failure' })
+    await vi.waitFor(() => expect(result()).toEqual({ action: 'handled' }))
+    expect(outgoing()).toEqual([])
+  })
 
   it.each([
     { systemPrompt: 'base', prompt: 'TUI request' },
