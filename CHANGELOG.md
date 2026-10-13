@@ -5,21 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.2] - 2026-10-13
+
+### Fixed
+- Forward structured model errors and missing model/auth startup configuration to WeChat (#11). Preserve routing through retries and avoid historical-error and duplicate notifications.
+  将结构化模型错误及缺少模型/认证配置的启动错误通知微信（#11），重试期间保留来源，避免历史错误和重复通知。
+- Use three compatibility modes: boundary-capable Pi confirms failure after settlement; 0.84.x conservatively reports a previous failed request; older Pi reports one failed attempt that may retry. Fix first-request cancellation false positives on boundary-capable hosts. Validated with 162 tests, seven published Pi API versions, and user-confirmed Linux testing.
+  按三档兼容处理：支持结束前边界的 Pi 在结束后确认失败，0.84.x 保守提示此前一次请求失败，更旧版本提示本次失败且可能重试；修复支持边界的宿主首次任务取消误报。通过 162 项测试、七个已发布 Pi 版本的 API 检查及用户 Linux 验证。
+- Explain persistent WeChat `ret=-2` rejections with a one-time warning and a `/wechat status` hint suggesting fresh activity from WeChat.
+  微信持续以 `ret=-2` 拒绝发送时，通过一次性警告及 `/wechat status` 提示先从微信发送一条消息。
 
 ### Changed
-### Fixed
-- Explain the remedy when WeChat rejects sends with `ret=-2` (fresh user activity required): a one-time warning suggests sending a message from WeChat first, and `/wechat status` marks the rejection until a send succeeds.
-  微信以 `ret=-2` 拒绝发送（需要新的用户活动）时说明补救方法：一次性警告提示先从微信发送一条消息，`/wechat status` 标注该拒绝状态直至发送成功。
+- Use a bracketed Unicode footer with a text WeChat label, removing the Nerd Font requirement.
+  状态栏改为带方括号的 Unicode 与微信文字标签，不再依赖 Nerd Font。
 
-- Footer returns to a bracketed status chip with standard Unicode glyphs (green `微信` label, `⇄`, green `▶` / red `⏸`) so every terminal renders them at a consistent size without Nerd Fonts or per-font fallback surprises.
-  底部恢复为方括号状态徽章，使用标准 Unicode（绿色 `微信`、`⇄`、绿色 `▶` / 红色 `⏸`），不依赖 Nerd Font，任何终端尺寸一致。
-
-### Fixed
-- Select error-notification behavior from checked public API signatures, independent of request history. Suppress first-run retry cancellation on boundary-capable Pi; use only a conservative prior-attempt notice on 0.84.x. Add 0.84.0/0.84.4 API checks and first/subsequent cancellation, recovery, exhaustion, and duplicate-event tests.
-  根据已验证的公共 API 特征选择通知方式，不依赖历史任务；支持结束前边界的 Pi 首次任务取消重试不误报，0.84.x 仅保守提示此前一次请求失败。补充 0.84.0/0.84.4 兼容检查及首次/后续取消、重试成功、耗尽和重复事件测试。
-- Report structured model failures and missing model/auth startup configuration to WeChat (#11, related to PR #9). Modern Pi waits for final settlement; legacy Pi reports one failed attempt without claiming retries have stopped. Preserve request routing through retries and suppress historical errors, cancellation, and duplicate notices.
-  将结构化模型错误及缺少模型/认证配置的启动错误通知微信（#11，相关 PR #9）。新版 Pi 等待最终结束，旧版每条请求只提示一次失败且不误称重试已停止；重试期间保留来源，避免历史错误、取消和重复通知。
+### Thanks
+- Thanks to [@Duducoco](https://github.com/Duducoco) for proposing error notifications in [PR #9](https://github.com/shenjiecode/pi-wechat-assistant/pull/9). This release covers the request through the main-branch implementation with version-aware cancellation and retry handling.
+  感谢 [@Duducoco](https://github.com/Duducoco) 在 [PR #9](https://github.com/shenjiecode/pi-wechat-assistant/pull/9) 中提出错误通知方案；本版通过主分支实现覆盖该需求，并补齐不同版本的取消与重试处理。
 
 ## [0.4.1] - 2026-10-13
 
