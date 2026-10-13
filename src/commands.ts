@@ -10,6 +10,7 @@ import {
   clearContextTokens,
   clearTransportState,
   getCredentialsPath,
+  getBridgeLockState,
   getQrCode,
   loadConfig,
   loadCredentials,
@@ -24,6 +25,7 @@ import { renderQrCode, formatError } from './utils.js'
 import { QR_POLL_INTERVAL_MS, QR_MAX_REFRESH } from './constants.js'
 import type { WechatPrompt } from './wechat-prompt.js'
 import { WECHAT_SOURCE_TAG } from './wechat-source.js'
+import { describeBridgeLock } from './bridge-lock.js'
 
 type Ctx = ExtensionContext | ExtensionCommandContext
 
@@ -124,9 +126,14 @@ async function cmdLogin(args: string, ctx: Ctx, deps: CommandDeps): Promise<void
 
 async function cmdStart(_args: string, ctx: ExtensionCommandContext, deps: CommandDeps): Promise<void> {
   deps.setLatestCtx(ctx)
+  if (deps.isRunning()) { deps.notify('微信桥接已经在运行', 'info'); return }
+  const owner = await getBridgeLockState()
+  if (owner.kind === 'other' || owner.kind === 'unknown') {
+    deps.notify(describeBridgeLock(owner), 'error')
+    return
+  }
   const activeClient = await deps.loadClient()
   if (!activeClient) { deps.notify('未找到微信凭证，请先执行 /wechat login', 'error'); return }
-  if (deps.isRunning()) { deps.notify('微信桥接已经在运行', 'info'); return }
   if (!ctx.isIdle()) {
     deps.notify('等待当前任务结束后启动微信桥接…', 'info')
     await ctx.waitForIdle()
@@ -174,6 +181,7 @@ async function cmdStatus(_args: string, ctx: Ctx, deps: CommandDeps): Promise<vo
     '微信模板: ' + deps.wechatPrompt.source,
     '用户模板路径: ' + deps.wechatPrompt.userPath,
     `运行状态: ${deps.isRunning() ? '✅ 运行中' : '⏸ 已停止'}`,
+    `桥接锁: ${describeBridgeLock(await getBridgeLockState())}`,
     `登录凭据: ${activeClient ? '已加载（有效性由接口验证）' : '未加载'}`,
     `消息发送凭据: ${activeClient?.hasContextToken ? '已保存（不代表仍有效）' : '未获取（发送时尝试不携带此凭据）'}`,
     `最近发送: ${describeApiResult(activeClient?.lastSend, 'API 返回成功（不代表已读）')}`,

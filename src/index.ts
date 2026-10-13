@@ -9,7 +9,8 @@ import { Type } from '@sinclair/typebox'
 // Type-only legacy import also works in hosts that only provide @earendil-works.
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
 import { SessionExpiredError, WeixinClient } from './client.js'
-import { acquireLock, releaseLock, loadCredentials, loadConfig, getConfigCache } from './auth.js'
+import { acquireLock, releaseLock, loadCredentials, loadConfig, getConfigCache, getBridgeLockState } from './auth.js'
+import { describeBridgeLock } from './bridge-lock.js'
 import { debugLog } from './logger.js'
 import { splitAndFilterMarkdown } from './message.js'
 import { MessageQueue } from './queue.js'
@@ -31,6 +32,7 @@ import { formatWechatStatus } from './status.js'
 import { ModelFailureNotice, hasSettledEvents, failureNoticeMode, summarizeModelError, type FailureNoticeMode } from './model-failure.js'
 
 const WECHAT_TOOL_NAMES = ['send_file_to_wechat', 'send_image_to_wechat']
+const WECHAT_TOOL_STATUS_TYPE = 'wechat-assistant-tool-status'
 
 type Ctx = ExtensionContext | ExtensionCommandContext
 
@@ -78,14 +80,19 @@ type ToolGuardResult = {
   cwd: string
 }
 
-function guardSendToWechat(
+async function stoppedBridgeReason(): Promise<string> {
+  const state = await getBridgeLockState()
+  if (state.kind === 'other' || state.kind === 'unknown') return describeBridgeLock(state)
+  return '本会话的微信桥接未启动，请执行 /wechat start；需要查看登录凭据及其他会话状态时执行 /wechat status。'
+}
+
+async function guardSendToWechat(
   client: WeixinClient | null,
   running: boolean,
   filePath: string,
   latestCtx: Ctx | null,
-): ToolGuardResult {
-  if (!client) return { allowed: false, error: fail('微信未登录，请先在 TUI 执行 /wechat login 和 /wechat start') }
-  if (!running) return { allowed: false, error: fail('微信桥接未启动，请先在 TUI 执行 /wechat start') }
+): Promise<ToolGuardResult> {
+  if (!client || !running) return { allowed: false, error: fail(await stoppedBridgeReason()) }
 
   const cwd = latestCtx?.cwd ?? process.cwd()
   const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
@@ -226,6 +233,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     modelFailure.reset()
     wechatPrompt.clear()
     if (toolsRegistered) {
+      // Modern hosts also remove hidden tools from nested/codemode discovery.
+      registerWechatTools(false)
       const active = pi.getActiveTools()
       const remaining = active.filter(name => !WECHAT_TOOL_NAMES.includes(name))
       if (remaining.length !== active.length) pi.setActiveTools(remaining)
@@ -254,7 +263,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   async function prepareBridge(): Promise<void> {
     if (getConfigCache().messageSourceTag?.enabled !== false) await wechatPrompt.load()
-    if (!toolsRegistered) registerWechatTools()
+    registerWechatTools(true)
     const active = pi.getActiveTools()
     const missing = WECHAT_TOOL_NAMES.filter(name => !active.includes(name))
     if (missing.length) pi.setActiveTools([...active, ...missing])
@@ -358,24 +367,28 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // AI 工具注册
   // ============================================================================
 
-  function registerWechatTools(): void {
+  function registerWechatTools(enabled: boolean): void {
+    // Older hosts ignore these fields; their active set and execution guards remain authoritative.
+    const visibility = { exposure: enabled ? 'direct' as const : 'hidden' as const, defaultActive: enabled }
     pi.registerTool({
+      ...visibility,
       name: 'send_file_to_wechat',
       label: 'Send File to WeChat',
       description: '发送项目目录中的文件到当前微信对话。用于将 AI 产出的代码、报告等文件直接发给微信用户。',
-      promptSnippet: '发送项目目录中的文件到微信',
-      promptGuidelines: [
+      promptSnippet: enabled ? '发送项目目录中的文件到微信' : undefined,
+      promptGuidelines: enabled ? [
         '当用户通过微信要求产出文件时，先写入文件再用 send_file_to_wechat 发送。',
         '只能发送项目工作目录内的文件（安全限制）。',
         '如果发送失败，工具会返回错误信息。不要重试超过 1 次。',
-      ],
+      ] : [],
       parameters: Type.Object({
         filePath: Type.String({ description: '要发送的文件路径（项目目录内的绝对路径或相对路径）' }),
         fileName: Type.Optional(Type.String({ description: '在微信中显示的文件名（可选，默认使用原文件名）' })),
       }),
       async execute(_toolCallId, params, _signal) {
-        const guard = guardSendToWechat(client, running, params.filePath, latestCtx)
+        const guard = await guardSendToWechat(client, running, params.filePath, latestCtx)
         if (!guard.allowed) return guard.error
+        if (!running || !client) return fail(await stoppedBridgeReason())
         const sizeError = guardFileSize(guard.resolvedPath)
         if (sizeError) return sizeError
 
@@ -392,21 +405,23 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     })
 
     pi.registerTool({
+      ...visibility,
       name: 'send_image_to_wechat',
       label: 'Send Image to WeChat',
       description: '发送项目目录中的图片到当前微信对话。用于将 AI 生成的图表、截图等直接发给微信用户。',
-      promptSnippet: '发送项目目录中的图片到微信（可预览）',
-      promptGuidelines: [
+      promptSnippet: enabled ? '发送项目目录中的图片到微信（可预览）' : undefined,
+      promptGuidelines: enabled ? [
         '当用户通过微信要求生成图表/截图/图片时，先生成图片文件再用 send_image_to_wechat 发送。',
         '只能发送项目工作目录内的图片（安全限制）。',
         '如果发送失败不要重试超过 1 次。',
-      ],
+      ] : [],
       parameters: Type.Object({
         imagePath: Type.String({ description: '要发送的图片路径（项目目录内的绝对路径或相对路径，支持 png/jpg/gif/webp）' }),
       }),
       async execute(_toolCallId, params, _signal) {
-        const guard = guardSendToWechat(client, running, params.imagePath, latestCtx)
+        const guard = await guardSendToWechat(client, running, params.imagePath, latestCtx)
         if (!guard.allowed) return guard.error
+        if (!running || !client) return fail(await stoppedBridgeReason())
         const sizeError = guardFileSize(guard.resolvedPath)
         if (sizeError) return sizeError
 
@@ -459,6 +474,20 @@ export default function wechatAssistant(pi: ExtensionAPI) {
         log(`自动启动失败: ${lockResult.message}`)
       }
     }
+  })
+
+  // Transient model context only: never persist stale stop notices in the session.
+  pi.on('context', (event) => {
+    const messages = event.messages.filter(message =>
+      !(message.role === 'custom' && message.customType === WECHAT_TOOL_STATUS_TYPE))
+    if (toolsRegistered && !running) {
+      messages.push({
+        role: 'custom', customType: WECHAT_TOOL_STATUS_TYPE, display: false, timestamp: Date.now(),
+        content: '微信桥接当前已停止，send_file_to_wechat 和 send_image_to_wechat 均不可用。'
+          + '不要依据历史中的工具说明尝试发送，也不要声称已发送；用户执行 /wechat start 后才会恢复。',
+      })
+    }
+    if (messages.length !== event.messages.length || (toolsRegistered && !running)) return { messages }
   })
 
   // Input may be queued: do not change the running reply's source here.
@@ -536,6 +565,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     turn.wechatConversationActive = false
     turn.targetUser = null
     queue.activeRequest = null
+    if (!running && toolsRegistered) {
+      const active = pi.getActiveTools()
+      const remaining = active.filter(name => !WECHAT_TOOL_NAMES.includes(name))
+      if (remaining.length !== active.length) pi.setActiveTools(remaining)
+    }
     const source = getConfigCache().messageSourceTag
     if (!running || source?.enabled === false || wechatPrompt.rules === null) return
     return {
@@ -545,8 +579,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   // Block known TUI-only question tools for a confirmed WeChat request. Modern
   // Pi also emits tool_call for nested calls made through codemode.
-  pi.on('tool_call', (event, ctx) => {
+  pi.on('tool_call', async (event, ctx) => {
     latestCtx = ctx
+    if (!running && WECHAT_TOOL_NAMES.includes(event.toolName)) {
+      return { block: true, reason: await stoppedBridgeReason() }
+    }
     if (!running || !turn.wechatConversationActive) return
     if (!queue.activeRequest?.replyProfile?.blockedTools.includes(event.toolName)) return
     return {

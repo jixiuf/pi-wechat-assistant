@@ -4,6 +4,7 @@ import type { BridgeConfig } from '../src/auth.js'
 const state = vi.hoisted(() => ({
   config: {} as BridgeConfig,
   queue: null as any,
+  lockState: { kind: 'missing' } as any,
   client: {
     userId: 'bound-user', accountId: 'bot', lastActiveUserId: null,
     hasContextToken: false,
@@ -26,6 +27,7 @@ vi.mock('../src/auth.js', async () => ({
   getConfigCache: vi.fn(() => state.config),
   acquireLock: vi.fn(async () => ({ success: true })),
   releaseLock: vi.fn(),
+  getBridgeLockState: vi.fn(async () => state.lockState),
 }))
 vi.mock('../src/queue.js', async () => {
   const actual = await vi.importActual<typeof import('../src/queue.js')>('../src/queue.js')
@@ -48,6 +50,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     vi.clearAllMocks()
     vi.stubEnv('NO_COLOR', '1')
     state.config = {}
+    state.lockState = { kind: 'missing' }
     state.client.hasContextToken = false
     state.client.lastSend = null
     state.client.onStatusChange = undefined
@@ -73,7 +76,11 @@ describe('bridge bidirectional sync and lifecycle', () => {
     extension({
       on: (name: string, handler: any) => { handlers[name] = handler; return unsubscribe ? () => {} : undefined },
       registerCommand: (name: string, command: any) => { commands[name] = command },
-      registerTool: (tool: any) => { registeredTools.set(tool.name, tool); activeTools.push(tool.name) },
+      registerTool: (tool: any) => {
+        registeredTools.set(tool.name, tool)
+        activeTools = activeTools.filter(name => name !== tool.name)
+        if (tool.exposure !== 'hidden') activeTools.push(tool.name)
+      },
       getActiveTools: () => [...activeTools], setActiveTools: (names: string[]) => { activeTools = [...names] },
       sendUserMessage,
     } as any)
@@ -151,7 +158,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     await failure()
     await handlers.agent_end({ messages: [] }, ctx)
     await handlers.agent_start({}, ctx)
-    expect(handlers.tool_call({ toolName: 'question' }, ctx)?.block).toBe(true)
+    expect((await handlers.tool_call({ toolName: 'question' }, ctx))?.block).toBe(true)
     await reply('recovered')
     await settle('completed')
     expect(outgoing()).toEqual([['bound-user', 'recovered']])
@@ -423,9 +430,81 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(registeredTools.size).toBe(2)
     await command('stop')
     expect(activeTools).toEqual(['read', 'bash'])
+    expect(registeredTools.get('send_file_to_wechat').exposure).toBe('hidden')
+    expect(registeredTools.get('send_image_to_wechat').exposure).toBe('hidden')
+    expect(registeredTools.get('send_file_to_wechat').promptSnippet).toBeUndefined()
+    expect(registeredTools.get('send_image_to_wechat').promptGuidelines).toEqual([])
     await command('start')
     expect(registeredTools.size).toBe(2)
     expect(activeTools).toHaveLength(4)
+    expect(registeredTools.get('send_file_to_wechat').exposure).toBe('direct')
+  })
+
+  it('removes tools reactivated by a legacy tool selector before a stopped run', async () => {
+    await command('start')
+    await command('stop')
+    activeTools.push('send_file_to_wechat', 'send_image_to_wechat')
+    expect(await handlers.before_agent_start({ systemPrompt: 'base', prompt: 'local' }, ctx)).toBeUndefined()
+    expect(activeTools).toEqual(['read', 'bash'])
+    for (const toolName of ['send_file_to_wechat', 'send_image_to_wechat']) {
+      expect(await handlers.tool_call({ toolName, parentToolCallId: 'codemode/1' }, ctx)).toMatchObject({ block: true })
+    }
+  })
+
+  it('keeps stop notices transient and removes them on restart without changing history', async () => {
+    const history = [{ role: 'user', content: 'work', timestamp: 1 }]
+    const original = structuredClone(history)
+    expect(await handlers.context({ messages: history }, ctx)).toBeUndefined()
+    await command('start')
+    expect(await handlers.context({ messages: history }, ctx)).toBeUndefined()
+    await command('stop')
+    const stopped = await handlers.context({ messages: history }, ctx)
+    expect(stopped.messages).toHaveLength(2)
+    expect(stopped.messages[1]).toMatchObject({ role: 'custom', content: expect.stringContaining('均不可用') })
+    expect(history).toEqual(original)
+    const repeated = await handlers.context({ messages: stopped.messages }, ctx)
+    expect(repeated.messages).toHaveLength(2)
+    await command('start')
+    expect(await handlers.context({ messages: stopped.messages }, ctx)).toEqual({ messages: history })
+    expect(await handlers.context({ messages: history }, ctx)).toBeUndefined()
+    expect(stopped.messages).toHaveLength(2)
+    await command('stop')
+    expect((await handlers.context({ messages: history }, ctx)).messages).toHaveLength(2)
+  })
+
+  it('explains other-process ownership in status and retained tool calls', async () => {
+    await command('start')
+    const retainedTool = registeredTools.get('send_file_to_wechat')
+    await command('stop')
+    state.lockState = { kind: 'other', pid: 123456, sessionId: 'other' }
+    await command('status')
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining('PID 123456'), 'info')
+    const result = await retainedTool.execute('old-call', { filePath: 'unused' })
+    expect(result.content[0].text).toContain('本会话不能直接发送')
+    expect(result.content[0].text).toContain('/wechat stop')
+    expect(result.content[0].text).not.toContain('微信未登录')
+  })
+
+  it('reports uncertain lock ownership instead of suggesting forced login', async () => {
+    state.lockState = { kind: 'unknown', pid: 123456, reason: '无权限检查持锁进程' }
+    await command('status')
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining('无法确认'), 'info')
+    expect(await handlers.tool_call({ toolName: 'send_image_to_wechat' }, ctx)).toMatchObject({
+      block: true, reason: expect.stringContaining('不会自动接管'),
+    })
+    expect(registeredTools.size).toBe(0)
+  })
+
+  it.each([
+    { kind: 'other', pid: 123456, sessionId: 'other' },
+    { kind: 'unknown', reason: '锁文件不可读' },
+  ])('keeps tools unregistered when start cannot establish ownership: $kind', async owner => {
+    state.lockState = owner
+    await command('start')
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining(owner.kind === 'other' ? 'PID 123456' : '无法确认'), 'error')
+    expect(registeredTools.size).toBe(0)
+    expect(activeTools).toEqual(['read', 'bash'])
+    expect(await handlers.before_agent_start({ systemPrompt: 'base', prompt: 'local' }, ctx)).toBeUndefined()
   })
 
   it('keeps the footer compact before and after acquiring context or sending successfully', async () => {

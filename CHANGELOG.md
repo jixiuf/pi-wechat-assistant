@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Share bridge-lock diagnostics across start, status, and sending guards (PR #13). Report other-process ownership without claiming polling health; keep unreadable locks and permission failures distinct from exited processes. Correct the stop command to `/wechat stop`.
+  启动、状态查询及发送守卫共用桥接锁诊断（PR #13）；指出其他进程持锁而不误称轮询正常，区分不可读锁、权限错误与已退出进程，并修正停止命令为 `/wechat stop`。
+- Register sending tools only on start; hide them and clear their prompt hints on stop, with active-tool cleanup and execution guards for older Pi. Restart restores availability without duplicate definitions.
+  仅启动时注册发送工具；停止时隐藏工具并清除其提示词说明，旧版 Pi 通过活动工具清理及执行守卫兜底；重启恢复可用性且不重复注册条目。
+- Add a transient stopped-tool notice to model context after stopping; remove it on restart without persisting it in session history or changing the system prompt.
+  停止后在模型上下文中临时说明发送工具不可用，重启时移除；不写入会话历史、不改变系统提示词。
+
 ## [0.4.2] - 2026-10-13
 
 ### Fixed

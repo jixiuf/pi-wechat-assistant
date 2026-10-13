@@ -7,6 +7,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { DEFAULT_BASE_URL, fetchQrCode, getQrCodeStatus, type QrStatusResponse } from './api.js'
 import type { Credentials } from './types.js'
+import { inspectBridgeLock, describeBridgeLock } from './bridge-lock.js'
 
 // --- 路径 ---
 
@@ -160,14 +161,7 @@ interface LockData {
   timestamp: number
 }
 
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
+export function getBridgeLockState() { return inspectBridgeLock(LOCK_FILE) }
 
 async function _readLockFile(): Promise<LockData | null> {
   return readJsonFile<LockData>(LOCK_FILE)
@@ -179,19 +173,14 @@ async function _writeLockFile(sessionId: string): Promise<void> {
 }
 
 export async function acquireLock(sessionId: string): Promise<{ success: boolean; message: string }> {
-  const existing = await _readLockFile()
-  if (existing) {
-    if (existing.sessionId === sessionId) {
+  const existing = await getBridgeLockState()
+  if (existing.kind === 'unknown') return { success: false, message: describeBridgeLock(existing) }
+  if (existing.kind === 'current' || existing.kind === 'other') {
+    if (existing.kind === 'current' && existing.sessionId === sessionId) {
       await _writeLockFile(sessionId)
       return { success: true, message: '锁已更新' }
     }
-    if (isProcessRunning(existing.pid)) {
-      return {
-        success: false,
-        message: `微信已被其他 pi 实例占用 (PID: ${existing.pid})，请先在那个实例中执行 /wechat-stop`,
-      }
-    }
-    // 进程不存在，锁已失效，可抢占
+    return { success: false, message: describeBridgeLock(existing) }
   }
 
   await _writeLockFile(sessionId)
