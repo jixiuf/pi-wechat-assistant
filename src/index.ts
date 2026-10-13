@@ -469,10 +469,15 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     updateStatusBar()
     setImmediate(() => void queue.drain())
     if (!request && running && client && getConfigCache().bidirectionalSync !== false) {
-      const text = extractTextFromMessageContent(event.message.content)
-      if (text) {
+      const content = event.message.content
+      const text = extractTextFromMessageContent(content)
+      const imageCount = Array.isArray(content) ? content.filter(part => part.type === 'image').length : 0
+      const preview = text
+        ? text + (imageCount ? `\n[附带 ${imageCount} 张图片]` : '')
+        : imageCount ? `发送了 ${imageCount} 张图片` : null
+      if (preview) {
         try {
-          for (const chunk of splitAndFilterMarkdown(`[电脑端] ${text}`)) await client.sendText(client.userId, chunk)
+          for (const chunk of splitAndFilterMarkdown(`[电脑端] ${preview}`)) await client.sendText(client.userId, chunk)
         } catch (error) { log(`TUI 输入同步失败: ${formatError(error)}`) }
       }
     }

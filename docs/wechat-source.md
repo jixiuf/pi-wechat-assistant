@@ -13,6 +13,8 @@ When enabled, each submitted WeChat batch starts with `[微信]`, followed by th
 
 The bridge identifies its own submitted messages when Pi consumes them. A marker typed in TUI, or `input.source === "extension"` alone, does not establish WeChat origin. This routing also works with the switch off and for follow-ups received during an existing run. With `/wechat config bidirectional off`, TUI replies stay local and WeChat task replies still return to WeChat.
 
+With bidirectional sync enabled, mirrored TUI messages include an image count. Image-only input is also announced. These notices are sent when Pi consumes the message; image data is not automatically forwarded to WeChat.
+
 ### Edit the reply template
 
 The packaged default is [`prompts/wechat.md`](../prompts/wechat.md). The optional user override is `~/.pi/agent/wechat-assistant/wechat-prompt.md` (normally `C:\Users\<user>\.pi\agent\wechat-assistant\wechat-prompt.md` on Windows).
@@ -77,6 +79,8 @@ References: [Pi 1.2.0 extension contracts](https://github.com/earendil-works/pi/
 开启后，每个新投递的微信消息批次以 `[微信]` 开头，随后仅附带用户原文。文字、语音转写、引用回复、图片描述及已保存文件的信息统一处理，合并后的批次只加一次。单独收到文件时仍只保存并回执，不触发 AI。
 
 桥接根据自己的投递记录，在 pi 真正消费消息时判断来源。TUI 手工输入来源标识，或仅有 `input.source === "extension"`，都不会自动被认作微信消息。开关关闭及任务运行中追加消息时，来源路由仍然有效。使用 `/wechat config bidirectional off` 时，电脑端回复不转发，微信任务回复继续正常返回。
+
+双向同步开启时，电脑端输入的微信副本会附带图片数量；纯图片输入也会发送提示。提示在 Pi 实际消费消息时发送，不自动向微信转发图片内容。
 
 ### 修改回复模板
 

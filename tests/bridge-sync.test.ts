@@ -235,6 +235,56 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(state.client.notifyStart).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    { text: '比较这两张图', expected: '[电脑端] 比较这两张图\n[附带 2 张图片]' },
+    { text: '', expected: '[电脑端] 发送了 2 张图片' },
+    { text: '长'.repeat(1200), expected: '[电脑端] ' + '长'.repeat(1200) + '\n[附带 2 张图片]' },
+  ])('mirrors consumed TUI images with text length $text.length', async ({ text, expected }) => {
+    await command('start')
+    await startRun('earlier task')
+    state.client.sendText.mockClear()
+    const images = [
+      { type: 'image', mimeType: 'image/png', data: 'first-image' },
+      { type: 'image', mimeType: 'image/jpeg', data: 'second-image' },
+    ]
+    const content = [{ type: 'text', text }, ...images]
+    const original = structuredClone(content)
+    await handlers.input({ source: 'interactive', text, images }, ctx)
+    expect(state.client.sendText).not.toHaveBeenCalled()
+    await handlers.message_start({ message: { role: 'user', content } }, ctx)
+    expect(state.client.sendText.mock.calls.map(([, chunk]) => chunk).join('')).toBe(expected)
+    expect(content).toEqual(original)
+  })
+
+  it.each(['disabled', 'stopped'])('does not mirror image-only messages when sync is %s', async mode => {
+    await command('start')
+    if (mode === 'disabled') await command('config bidirectional off')
+    else await command('stop')
+    const content = [{ type: 'image', mimeType: 'image/png', data: 'image' }]
+    await handlers.message_start({ message: { role: 'user', content } }, ctx)
+    expect(state.client.sendText).not.toHaveBeenCalled()
+  })
+
+  it('does not mirror images submitted by the WeChat bridge', async () => {
+    await command('start')
+    state.queue.queue.push({
+      id: 'image', userId: 'bound-user', messageId: 'image', receivedAt: new Date(),
+      text: '', preview: '[图片]', contextToken: '',
+      imageData: { data: 'wechat-image', mediaType: 'image/png' },
+    })
+    await state.queue.drain()
+    expect(sendUserMessage).toHaveBeenCalledOnce()
+    const content = sendUserMessage.mock.calls[0][0]
+    const text = extractTextFromMessageContent(content)!
+    const images = content.filter((part: any) => part.type === 'image')
+    expect(images).toHaveLength(1)
+    await handlers.input({ source: 'extension', text, images }, ctx)
+    state.client.sendText.mockClear()
+    await handlers.message_start({ message: { role: 'user', content } }, ctx)
+    expect(state.queue.activeRequest?.userId).toBe('bound-user')
+    expect(state.client.sendText).not.toHaveBeenCalled()
+  })
+
   it('can disable TUI sync without changing the message source selection', async () => {
     state.config.bidirectionalSync = false
     await command('start')

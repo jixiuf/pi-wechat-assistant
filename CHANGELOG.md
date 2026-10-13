@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Include image counts in mirrored TUI input, including image-only messages, when bidirectional sync is enabled.
+  双向同步开启时，电脑端输入的微信副本显示图片数量，并覆盖纯图片消息。
+
 ## [0.4.0] - 2026-10-13
 
 ### Added
