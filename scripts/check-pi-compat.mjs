@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const cache = path.join(root, 'node_modules', '.cache', 'pi-wechat-compat', 'packages')
-const versions = ['0.73.1', '0.78.0', '0.99.2', '1.1.0', '1.2.0']
+const versions = ['0.73.1', '0.78.0', '0.84.0', '0.84.4', '0.99.2', '1.1.0', '1.2.0']
 const selected = process.argv.slice(2)
 if (selected.some(version => !versions.includes(version))) throw new Error('Unsupported compatibility version')
 
@@ -69,6 +69,14 @@ const messagesAreTyped: IsAny<Parameters<ExtensionAPI['sendUserMessage']>[0]> = 
 type HasSettledEvent = Extract<ExtensionEvent, { type: 'agent_settled' }> extends never ? false : true
 type HasProjectTrust = 'isProjectTrusted' extends keyof ExtensionContext ? true : false
 const settlementCapabilityMatches: HasProjectTrust extends HasSettledEvent ? true : false = true
+type HasBoundaryEvent = Extract<ExtensionEvent, { type: 'agent_before_settle' }> extends never ? false : true
+// Check the shared registration return type through an event available on every host.
+declare const pi: ExtensionAPI
+const registration = pi.on('agent_start', () => {})
+type HasUnsubscribe = typeof registration extends (...args: any[]) => any ? true : false
+const boundaryCapabilityMatches: HasUnsubscribe extends HasBoundaryEvent ? true : false = true
+const expectedSettled: HasSettledEvent = ${!['0.73.1', '0.78.0'].includes(version)}
+const expectedBoundary: HasBoundaryEvent = ${!['0.73.1', '0.78.0', '0.84.0', '0.84.4'].includes(version)}
 `)
   const configPath = path.join(cache, `tsconfig-${version}.json`)
   await fs.writeFile(configPath, JSON.stringify({

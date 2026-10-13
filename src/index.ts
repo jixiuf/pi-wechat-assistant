@@ -28,7 +28,7 @@ import type { IncomingMessage } from './types.js'
 import { WechatPrompt } from './wechat-prompt.js'
 import { appendWechatSystemRules, WECHAT_SOURCE_TAG } from './wechat-source.js'
 import { formatWechatStatus } from './status.js'
-import { ModelFailureNotice, hasSettledEvents, summarizeModelError } from './model-failure.js'
+import { ModelFailureNotice, hasSettledEvents, failureNoticeMode, summarizeModelError, type FailureNoticeMode } from './model-failure.js'
 
 const WECHAT_TOOL_NAMES = ['send_file_to_wechat', 'send_image_to_wechat']
 
@@ -578,7 +578,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     modelFailure.observe(event.message, ctx.signal)
     if (event.message.stopReason === 'error' || event.message.stopReason === 'aborted') {
       // Never forward failed partial output: retries may replay it.
-      if (!hasSettledEvents(ctx) && event.message.stopReason === 'error') await sendModelFailure(false)
+      if (!hasSettledEvents(ctx) && event.message.stopReason === 'error') await sendModelFailure('attempt')
       return
     }
     if (!turn.wechatConversationActive && getConfigCache().bidirectionalSync === false) return
@@ -633,10 +633,10 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     setImmediate(() => void queue.drain())
   })
 
-  async function sendModelFailure(final: boolean, aborted = false): Promise<void> {
+  async function sendModelFailure(mode: FailureNoticeMode, aborted = false): Promise<void> {
     if (!running || !client || !turn.targetUser) return
     if (!turn.wechatConversationActive && getConfigCache().bidirectionalSync === false) return
-    const notice = modelFailure.take(final, aborted)
+    const notice = modelFailure.take(mode, aborted)
     if (!notice) return
     try { await client.sendText(turn.targetUser, notice) }
     catch (error) { log(`模型错误通知发送失败: ${formatError(error)}`) }
@@ -648,10 +648,10 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     name: 'agent_before_settle' | 'agent_settled',
     handler: (event: { outcome?: string; aborted?: boolean }, ctx: ExtensionContext) => void | Promise<void>,
   ) => unknown
-  onSettlement('agent_before_settle', event => { modelFailure.beforeSettle(event.outcome ?? '') })
+  const boundarySubscription = onSettlement('agent_before_settle', event => { modelFailure.beforeSettle(event.outcome ?? '') })
   onSettlement('agent_settled', async (event, ctx) => {
     latestCtx = ctx
-    const sending = sendModelFailure(true, event.aborted === true)
+    const sending = sendModelFailure(failureNoticeMode(ctx, boundarySubscription), event.aborted === true)
     modelFailure.reset()
     queue.activeRequest = null
     turn.wechatConversationActive = false

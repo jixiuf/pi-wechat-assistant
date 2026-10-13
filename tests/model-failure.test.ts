@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ModelFailureNotice, summarizeModelError } from '../src/model-failure.js'
+import { ModelFailureNotice, summarizeModelError, failureNoticeMode } from '../src/model-failure.js'
 
 describe('structured model failure notices', () => {
   it('redacts common credential forms and URL query/userinfo before truncating', () => {
@@ -17,31 +17,44 @@ describe('structured model failure notices', () => {
   it('claims a notice once per user request, retaining the claim across retry loops', () => {
     const failure = new ModelFailureNotice()
     failure.observe({ stopReason: 'error', errorMessage: 'quota' })
-    expect(failure.take(false)).toContain('可能自动重试')
+    expect(failure.take('attempt')).toContain('可能自动重试')
     failure.startAttempt()
     failure.observe({ stopReason: 'error', errorMessage: 'quota again' })
-    expect(failure.take(false)).toBeNull()
+    expect(failure.take('attempt')).toBeNull()
     failure.reset()
     failure.observe({ stopReason: 'error', errorMessage: 'quota again' })
-    expect(failure.take(false)).not.toBeNull()
+    expect(failure.take('attempt')).not.toBeNull()
   })
-  it('notifies at settlement on hosts without a boundary event and suppresses recovered retries', () => {
+  it('distinguishes public host signatures before any request runs', () => {
+    expect(failureNoticeMode({} as any, undefined)).toBe('attempt')
+    expect(failureNoticeMode({ isProjectTrusted: () => true } as any, undefined)).toBe('settled')
+    expect(failureNoticeMode({ isProjectTrusted: () => true } as any, () => {})).toBe('boundary')
+  })
+  it('requires an error boundary on both the first and subsequent requests', () => {
+    const failure = new ModelFailureNotice()
+    for (let i = 0; i < 2; i++) {
+      failure.observe({ stopReason: 'error', errorMessage: 'quota' })
+      expect(failure.take('boundary')).toBeNull()
+      failure.beforeSettle('error')
+      expect(failure.take('boundary')).toContain('自动处理已结束')
+      expect(failure.take('boundary')).toBeNull()
+      failure.reset()
+    }
+  })
+  it('uses conservative settlement wording and does not change capability after an observed boundary', () => {
+    const failure = new ModelFailureNotice()
+    failure.beforeSettle('completed')
+    failure.reset()
+    failure.observe({ stopReason: 'error', errorMessage: 'quota' })
+    expect(failure.take('settled')).toBe('⚠️ 此前一次模型请求失败：quota')
+    expect(failure.take('settled')).toBeNull()
+  })
+  it.each(['attempt', 'settled', 'boundary'] as const)('honors an aborted signal in %s mode', mode => {
     const failure = new ModelFailureNotice()
     const abort = new AbortController()
     failure.observe({ stopReason: 'error', errorMessage: 'quota' }, abort.signal)
-    // A host that never emits agent_before_settle (e.g. Pi 0.84.x) still settles
-    // with the observed error, so the settlement notifies.
-    expect(failure.take(true)).toContain('自动处理已结束')
-    failure.reset()
-    // Once a boundary event is seen, the host is treated as capable: a
-    // non-error boundary means the retry recovered.
-    failure.beforeSettle('completed')
-    failure.observe({ stopReason: 'error', errorMessage: 'quota' }, abort.signal)
-    expect(failure.take(true)).toBeNull()
-    failure.reset()
     failure.beforeSettle('error')
-    failure.observe({ stopReason: 'error', errorMessage: 'quota' }, abort.signal)
     abort.abort()
-    expect(failure.take(true)).toBeNull()
+    expect(failure.take(mode)).toBeNull()
   })
 })

@@ -5,6 +5,17 @@ export function hasSettledEvents(ctx: ExtensionContext): boolean {
   return typeof (ctx as ExtensionContext & { isProjectTrusted?: unknown }).isProjectTrusted === 'function'
 }
 
+export type FailureNoticeMode = 'attempt' | 'settled' | 'boundary'
+
+/** Public API signatures, checked together against the published version matrix.
+ * Boundary-capable hosts return an unsubscribe function from on(); 0.84 returns void.
+ * Do not learn capabilities from whether a previous request happened to emit an event.
+ */
+export function failureNoticeMode(ctx: ExtensionContext, boundarySubscription: unknown): FailureNoticeMode {
+  if (!hasSettledEvents(ctx)) return 'attempt'
+  return typeof boundarySubscription === 'function' ? 'boundary' : 'settled'
+}
+
 /** Provider diagnostics only; never infer failure from assistant/tool text. */
 export function summarizeModelError(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) return '模型服务未提供错误详情，请在 Pi 中查看。'
@@ -26,8 +37,6 @@ export class ModelFailureNotice {
   private error: string | null = null
   private notified = false
   private boundaryError = false
-  /** Latched per host: true once any agent_before_settle event is observed. */
-  private boundarySeen = false
   private signal: AbortSignal | undefined
 
   reset(): void {
@@ -48,20 +57,16 @@ export class ModelFailureNotice {
   }
 
   beforeSettle(outcome: string): void {
-    this.boundarySeen = true
     this.boundaryError = outcome === 'error'
   }
 
-  take(final: boolean, aborted = false): string | null {
+  take(mode: FailureNoticeMode, aborted = false): string | null {
     if (!this.error || this.notified || aborted || this.signal?.aborted) return null
-    // On hosts that emit the boundary event, a non-error boundary means an
-    // automatic retry recovered; suppress. Hosts that never emit it (Pi 0.84.x
-    // has agent_settled but no agent_before_settle) settle with the observed
-    // error, so the settlement itself confirms the failure.
-    if (final && !this.boundaryError && this.boundarySeen) return null
+    if (mode === 'boundary' && !this.boundaryError) return null
     // Claim before awaiting transport; do not duplicate on a repeated event or ambiguous send failure.
     this.notified = true
-    return final
+    if (mode === 'settled') return `⚠️ 此前一次模型请求失败：${this.error}`
+    return mode === 'boundary'
       ? `⚠️ 模型请求失败：${this.error}\n本次自动处理已结束，请检查后重试。`
       : `⚠️ 本次模型请求失败：${this.error}\nPi 可能自动重试；这不表示整个任务已停止。`
   }

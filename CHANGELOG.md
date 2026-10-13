@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   底部恢复为方括号状态徽章，使用标准 Unicode（绿色 `微信`、`⇄`、绿色 `▶` / 红色 `⏸`），不依赖 Nerd Font，任何终端尺寸一致。
 
 ### Fixed
-- Notify on final settlement for hosts that expose `agent_settled` but never emit `agent_before_settle` (e.g. Pi 0.84.x): until the host is seen emitting a boundary event, a settled run with an observed error notifies directly; capable hosts keep suppressing recovered retries.
-  修复有 `agent_settled` 但不发出 `agent_before_settle` 的宿主（如 Pi 0.84.x）收不到模型失败通知的问题：宿主未见过边界事件前，稳定结束且观察到错误即直接通知；支持边界事件的宿主仍会在重试成功后保持静默。
+- Select error-notification behavior from checked public API signatures, independent of request history. Suppress first-run retry cancellation on boundary-capable Pi; use only a conservative prior-attempt notice on 0.84.x. Add 0.84.0/0.84.4 API checks and first/subsequent cancellation, recovery, exhaustion, and duplicate-event tests.
+  根据已验证的公共 API 特征选择通知方式，不依赖历史任务；支持结束前边界的 Pi 首次任务取消重试不误报，0.84.x 仅保守提示此前一次请求失败。补充 0.84.0/0.84.4 兼容检查及首次/后续取消、重试成功、耗尽和重复事件测试。
 - Report structured model failures and missing model/auth startup configuration to WeChat (#11, related to PR #9). Modern Pi waits for final settlement; legacy Pi reports one failed attempt without claiming retries have stopped. Preserve request routing through retries and suppress historical errors, cancellation, and duplicate notices.
   将结构化模型错误及缺少模型/认证配置的启动错误通知微信（#11，相关 PR #9）。新版 Pi 等待最终结束，旧版每条请求只提示一次失败且不误称重试已停止；重试期间保留来源，避免历史错误、取消和重复通知。
 

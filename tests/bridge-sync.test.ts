@@ -66,15 +66,18 @@ describe('bridge bidirectional sync and lifecycle', () => {
       ui: { notify: vi.fn(), setStatus: vi.fn() },
     }
     oldListeners = new Map(['SIGINT', 'SIGTERM', 'beforeExit'].map(name => [name, process.listeners(name)]))
+    installExtension()
+    await handlers.session_start({}, ctx)
+  })
+  function installExtension(unsubscribe = true) {
     extension({
-      on: (name: string, handler: any) => { handlers[name] = handler },
+      on: (name: string, handler: any) => { handlers[name] = handler; return unsubscribe ? () => {} : undefined },
       registerCommand: (name: string, command: any) => { commands[name] = command },
       registerTool: (tool: any) => { registeredTools.set(tool.name, tool); activeTools.push(tool.name) },
       getActiveTools: () => [...activeTools], setActiveTools: (names: string[]) => { activeTools = [...names] },
       sendUserMessage,
     } as any)
-    await handlers.session_start({}, ctx)
-  })
+  }
   afterEach(async () => {
     await handlers.session_shutdown({}, ctx)
     for (const [name, previous] of oldListeners) {
@@ -171,14 +174,18 @@ describe('bridge bidirectional sync and lifecycle', () => {
     await command('start')
     await wechatInput('work', true)
     if (mode === 'retry-cancel-before-boundary') {
-      // 0.99.2 skipped the boundary after a cancel during retry backoff; an
-      // earlier normal settlement already latched this host as boundary-capable.
-      await reply('warmup')
-      await settle('completed')
-      state.client.sendText.mockClear()
       await failure()
       await handlers.agent_settled({}, ctx) // 0.99.2 has no aborted field
       expect(outgoing()).toEqual([])
+      // A fresh request restores a real reply target after settlement.
+      await wechatInput('second request', true)
+      await failure()
+      await handlers.agent_settled({}, ctx)
+      expect(outgoing()).toEqual([])
+      await wechatInput('third request', true)
+      await failure()
+      await settle()
+      expect(outgoing()).toEqual([['bound-user', expect.stringContaining('自动处理已结束')]])
       return
     }
     const abort = new AbortController()
@@ -186,19 +193,57 @@ describe('bridge bidirectional sync and lifecycle', () => {
     await failure()
     if (mode === 'aborted-message') await handlers.message_end({ message: { role: 'assistant', stopReason: 'aborted', content: [] } }, ctx)
     if (mode === 'aborted-signal') abort.abort()
-    else await settle(mode === 'aborted-message' ? 'aborted' : 'error', mode === 'aborted-settlement')
+    await settle(mode === 'aborted-message' ? 'aborted' : 'error', mode === 'aborted-settlement')
     expect(outgoing()).toEqual([])
   })
 
-  it('notifies at settlement on hosts that never emit the boundary event (Pi 0.84.x)', async () => {
-    modern() // isProjectTrusted present, so the probe selects the settled path…
-    await command('start')
-    await wechatInput('work', true)
-    await failure('401 invalid api key')
-    await handlers.agent_end({ messages: [] }, ctx)
-    await handlers.agent_settled({}, ctx) // …but the host has no agent_before_settle
-    expect(outgoing()).toEqual([['bound-user', expect.stringContaining('401 invalid api key')]])
-    expect(outgoing()[0][1]).toContain('自动处理已结束')
+  describe('Pi 0.84 settlement-only host', () => {
+    beforeEach(async () => {
+      await handlers.session_shutdown({}, ctx)
+      installExtension(false)
+      modern()
+      await handlers.session_start({}, ctx)
+      await command('start')
+    })
+    it.each(['cancel-during-backoff', 'retry-exhausted'])('sends one conservative notice for %s, including subsequent requests', async outcome => {
+      for (let request = 0; request < 2; request++) {
+        state.client.sendText.mockClear()
+        await wechatInput(`work ${request}`, true)
+        await failure('temporary error')
+        await handlers.agent_end({ messages: [] }, ctx)
+        if (outcome === 'retry-exhausted') {
+          await handlers.agent_start({}, ctx)
+          await failure('last attempt error')
+          await handlers.agent_end({ messages: [] }, ctx)
+        }
+        expect(outgoing()).toEqual([])
+        // Both outcomes have the same public event on 0.84: no aborted field.
+        await handlers.agent_settled({}, ctx)
+        const detail = outcome === 'retry-exhausted' ? 'last attempt error' : 'temporary error'
+        expect(outgoing()).toEqual([['bound-user', `⚠️ 此前一次模型请求失败：${detail}`]])
+        await handlers.agent_settled({}, ctx)
+        expect(outgoing()).toHaveLength(1)
+      }
+    })
+    it('suppresses a recovered retry', async () => {
+      await wechatInput('work', true)
+      await failure()
+      await handlers.agent_end({ messages: [] }, ctx)
+      await handlers.agent_start({}, ctx)
+      await reply('recovered')
+      await handlers.agent_settled({}, ctx)
+      expect(outgoing()).toEqual([['bound-user', 'recovered']])
+    })
+    it.each(['message', 'signal'])('suppresses explicit cancellation via %s', async mode => {
+      await wechatInput('work', true)
+      const abort = new AbortController()
+      ctx.signal = abort.signal
+      await failure()
+      if (mode === 'signal') abort.abort()
+      else await handlers.message_end({ message: { role: 'assistant', stopReason: 'aborted', content: [] } }, ctx)
+      await handlers.agent_settled({}, ctx)
+      expect(outgoing()).toEqual([])
+    })
   })
 
   it('does not infer model failure from keywords, tool errors, history, or silence', async () => {
