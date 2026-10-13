@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.4] - 2026-10-14
 
 ### Added
 - Cooperative bridge handoff: after local startup checks, `/wechat start` can ask a protocol-capable owner to stop, wait for its poller, in-flight sends, and state writes to finish, and acquire the released lock exclusively. Legacy owners require manual `/wechat stop`; timeout, cancellation, or changed ownership never forces takeover.
@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Serialize lock creation, stale-lock cleanup, and release. Give each bridge start a unique instance ID and reload receive state after acquiring ownership. Stop accepting messages before draining the previous poller; do not cancel the local AI task.
   串行处理锁创建、失效锁清理和释放；每次启动分配唯一实例 ID，获取锁后重新读取接收状态；停止接收后等待旧轮询退出，不取消本机 AI 任务。
-- Move unreleased handoff and login changes out of the already-published 0.4.3 notes.
-  将尚未发布的交接及登录改动移出已发布的 0.4.3 说明。
+
+### Validation
+- Passed 206 automated tests and API compatibility checks against seven Pi versions (0.73.1, 0.78.0, 0.84.0, 0.84.4, 0.99.2, 1.1.0, and 1.2.0). Two-session handoff was also verified by the maintainer on Linux.
+  通过 206 项自动化测试及七个 Pi 版本（0.73.1、0.78.0、0.84.0、0.84.4、0.99.2、1.1.0、1.2.0）的 API 兼容检查；维护者已在 Linux 验证双会话交接。
 
 ## [0.4.3] - 2026-10-14
 
