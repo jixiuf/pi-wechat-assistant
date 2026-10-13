@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish
+        required: true
+        type: string
+
+concurrency:
+  group: npm-publish-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -11,25 +21,50 @@ jobs:
     permissions:
       contents: write
       id-token: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
+      - name: Validate release tag
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release tag"; exit 1; }
+
       - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # Node 22 bundles npm 10, which cannot authenticate with npm OIDC.
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.15.0
+
       - run: npm ci
 
       - name: Verify package version matches tag
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${RELEASE_TAG#v}"
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
             echo "❌ Version mismatch: package.json=$PKG_VERSION, tag=$TAG_VERSION"
             exit 1
           fi
           echo "✅ Version verified: $PKG_VERSION"
+
+      - name: Extract release notes
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const version = process.env.RELEASE_TAG.slice(1);
+          const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+          const heading = `## [${version}]`;
+          const start = changelog.indexOf(heading);
+          if (start < 0) throw new Error(`Missing changelog for ${version}`);
+          const end = changelog.indexOf('\n## [', start + heading.length);
+          fs.writeFileSync('release-notes.md', changelog.slice(start, end < 0 ? undefined : end).trim() + '\n');
+          NODE
 
       - run: npm publish --access public
         env:
@@ -38,4 +73,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          generate_release_notes: true
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: release-notes.md
