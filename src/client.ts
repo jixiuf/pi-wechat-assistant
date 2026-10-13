@@ -44,6 +44,23 @@ export class SessionExpiredError extends Error {
   }
 }
 
+export interface ApiCallResult {
+  success: boolean
+  at: string
+  error?: string
+  code?: number
+  httpStatus?: number
+}
+
+function failedApiCall(error: unknown): ApiCallResult {
+  return {
+    success: false,
+    at: new Date().toISOString(),
+    error: error instanceof Error ? error.message || '接口请求失败' : String(error),
+    ...(error instanceof ApiError ? { code: error.code, httpStatus: error.status } : {}),
+  }
+}
+
 // --- 加密辅助 ---
 
 /** AES-128-ECB 加密（微信 iLink Bot 要求） */
@@ -133,7 +150,8 @@ async function uploadAndBuildItem(
 // ============================================================================
 
 export class WeixinClient {
-  lastSend: { success: boolean; at: string; error?: string } | null = null
+  lastSend: ApiCallResult | null = null
+  readonly lastLifecycle: { start: ApiCallResult | null; stop: ApiCallResult | null } = { start: null, stop: null }
   onStatusChange?: () => void
   private readonly token: string
   private baseUrl: string
@@ -175,12 +193,20 @@ export class WeixinClient {
   get lastActiveUserId(): string | null { return this._lastActiveUserId }
   get hasContextToken(): boolean { return this.contextTokens.has(this.userId) }
 
-  async notifyStart(): Promise<void> {
-    await apiNotifyStart(this.baseUrl, this.token)
-  }
+  async notifyStart(): Promise<void> { await this.notifyLifecycle('start') }
 
-  async notifyStop(): Promise<void> {
-    await apiNotifyStop(this.baseUrl, this.token)
+  async notifyStop(): Promise<void> { await this.notifyLifecycle('stop') }
+
+  private async notifyLifecycle(kind: 'start' | 'stop'): Promise<void> {
+    try {
+      await (kind === 'start' ? apiNotifyStart : apiNotifyStop)(this.baseUrl, this.token)
+      this.lastLifecycle[kind] = { success: true, at: new Date().toISOString() }
+    } catch (error) {
+      this.lastLifecycle[kind] = failedApiCall(error)
+      throw error
+    } finally {
+      this.onStatusChange?.()
+    }
   }
 
   private async sendWithFallback(userId: string, send: (contextToken: string | undefined) => Promise<unknown>): Promise<void> {
@@ -197,7 +223,7 @@ export class WeixinClient {
       }
       this.lastSend = { success: true, at: new Date().toISOString() }
     } catch (error) {
-      this.lastSend = { success: false, at: new Date().toISOString(), error: error instanceof Error ? error.message || '发送被拒绝' : String(error) }
+      this.lastSend = failedApiCall(error)
       throw error
     } finally {
       this.onStatusChange?.()
@@ -275,9 +301,9 @@ export class WeixinClient {
   // --- 消息发送 ---
 
   async sendText(userId: string, text: string): Promise<void> {
-    const message = text.trim()
-    if (!message) throw new Error('Message text cannot be empty')
-    await this.sendWithFallback(userId, contextToken => apiSendMessage(this.baseUrl, this.token, userId, message, contextToken))
+    // Validate emptiness without stripping code indentation, trailing spaces or newlines.
+    if (!text.trim()) throw new Error('Message text cannot be empty')
+    await this.sendWithFallback(userId, contextToken => apiSendMessage(this.baseUrl, this.token, userId, text, contextToken))
   }
 
   /** 发送文件 — 委托给 sendMedia */

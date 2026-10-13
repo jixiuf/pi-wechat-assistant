@@ -130,6 +130,23 @@ describe('WeixinClient sender authorization', () => {
     expect(client.lastSend?.success).toBe(true)
   })
 
+  it('sends text verbatim without trimming code indentation or trailing newlines', async () => {
+    const client = await WeixinClient.create(credentials)
+    const verbatim = '  const x = 1;\n\n'
+    await client.sendText(credentials.userId, verbatim)
+    expect(mocks.sendMessage).toHaveBeenCalledWith(credentials.baseUrl, credentials.token, credentials.userId, verbatim, undefined)
+    await expect(client.sendText(credentials.userId, '   ')).rejects.toThrow('Message text cannot be empty')
+  })
+
+  it('records lifecycle notification results for diagnostics', async () => {
+    const client = await WeixinClient.create(credentials)
+    mocks.notifyStart.mockRejectedValueOnce(new ApiError('start failed', { status: 503 }))
+    await expect(client.notifyStart()).rejects.toThrow('start failed')
+    expect(client.lastLifecycle.start).toMatchObject({ success: false, error: 'start failed', httpStatus: 503 })
+    await client.notifyStop()
+    expect(client.lastLifecycle.stop).toMatchObject({ success: true })
+  })
+
   it('uses restored context and retries once without it only on ret=-2', async () => {
     mocks.loadContextTokens.mockResolvedValue({ lastUserId: null, tokens: { 'bound-user': 'cached' } })
     mocks.sendMessage.mockRejectedValueOnce(new ApiError('prepare failed', { status: 200, code: -2 }))

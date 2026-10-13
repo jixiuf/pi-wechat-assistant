@@ -23,7 +23,9 @@ vi.mock('../src/media.js', () => ({
 const queues = new Set<MessageQueue>()
 beforeEach(() => {
   vi.clearAllMocks()
-  vi.mocked(getConfigCache).mockReturnValue({})
+  // Marker and reply profile are on by default; opt these unit tests out to keep
+  // asserting raw passthrough behaviour.
+  vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: false } })
   vi.mocked(fetchImageAsBase64).mockResolvedValue(null)
   vi.mocked(fetchFile).mockResolvedValue(null)
   vi.mocked(saveFileToDisk).mockResolvedValue(null)
@@ -39,7 +41,6 @@ function makeQueue(opts?: {
   client?: ReturnType<typeof vi.fn>
   running?: boolean
   agentIdle?: boolean
-  rules?: () => string | null
   canSubmit?: () => boolean
 }) {
   const client = opts?.client ?? vi.fn().mockReturnValue(null)
@@ -58,7 +59,6 @@ function makeQueue(opts?: {
     () => wechatFilesDir() as any,
     sendUserMessage,
     updateStatusBar,
-    opts?.rules,
     opts?.canSubmit,
   )
   queues.add(queue)
@@ -195,20 +195,15 @@ describe('WeChat submissions and origin tracking', () => {
     expect(queue.consumeSubmittedRequest('微信原文')?.userId).toBe('user_1')
   })
 
-  it('captures one source marker and a rules snapshot for every new batch', async () => {
+  it('tags each new batch with one marker and keeps reply rules out of user messages', async () => {
     vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: true } })
-    let rules = '旧约定'
-    const { queue, sendUserMessage } = makeQueue({ client: testClient(), agentIdle: false, rules: () => rules })
+    const { queue, sendUserMessage } = makeQueue({ client: testClient(), agentIdle: false })
     queue.enqueue(makeMsg({ text: '第一条' }))
     await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    const first = sendUserMessage.mock.calls[0][0]
-    rules = '新约定'
+    expect(sendUserMessage.mock.calls[0][0]).toBe(WECHAT_SOURCE_TAG + '\n\n第一条')
     queue.enqueue(makeMsg({ text: '第二条' }))
     await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledTimes(2))
-    expect(first).toContain('旧约定')
-    expect(first).not.toContain('新约定')
-    expect(sendUserMessage.mock.calls[1][0]).toContain('新约定')
-    expect(sendUserMessage.mock.calls[1][0].split(WECHAT_SOURCE_TAG)).toHaveLength(2)
+    expect(sendUserMessage.mock.calls[1][0]).toBe(WECHAT_SOURCE_TAG + '\n\n第二条')
   })
 
   it('does not treat a marker in TUI or another extension input as proof of WeChat origin', async () => {
@@ -266,6 +261,18 @@ describe('WeChat submissions and origin tracking', () => {
     expect(sendUserMessage).toHaveBeenCalledOnce()
   })
 
+  it('reports pending submissions for run-origin checks and clears them once consumed', async () => {
+    vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: true } })
+    const { queue, sendUserMessage } = makeQueue({ client: testClient() })
+    queue.enqueue(makeMsg({ text: '微信任务' }))
+    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
+    const marked = WECHAT_SOURCE_TAG + '\n\n微信任务'
+    expect(queue.matchesPendingSubmission(marked)).toBe(true)
+    expect(queue.matchesPendingSubmission('别的话')).toBe(false)
+    queue.consumeSubmittedRequest(marked)
+    expect(queue.matchesPendingSubmission(marked)).toBe(false)
+  })
+
   it('discards origin records on stop rather than confusing a later TUI message', async () => {
     const { queue, sendUserMessage } = makeQueue({ client: testClient() })
     queue.enqueue(makeMsg({ text: '旧消息' }))
@@ -281,7 +288,7 @@ describe('files accompany the correct input batch', () => {
     vi.mocked(fetchFile).mockImplementation(() => new Promise(resolve => { completeDownload = resolve }))
     vi.mocked(saveFileToDisk).mockResolvedValue('C:/project/report.txt')
     vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: true } })
-    const { queue, sendUserMessage } = makeQueue({ client: testClient(), rules: () => '回复约定' })
+    const { queue, sendUserMessage } = makeQueue({ client: testClient() })
     queue.enqueue(makeMsg({ text: '读取这个文件', fileEncryptParam: 'file', fileName: 'report.txt' }))
     expect(sendUserMessage).not.toHaveBeenCalled()
     completeDownload(Buffer.from('report'))

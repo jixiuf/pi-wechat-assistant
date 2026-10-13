@@ -2,14 +2,14 @@
 
 ## English
 
-The source marker, reply template, and question-tool guard share one switch, **off by default**:
+The source marker, reply template, and question-tool guard share one switch, **on by default**:
 
 ```text
 /wechat config source on
 /wechat config source off
 ```
 
-When enabled, each submitted WeChat batch starts with `[来源：微信]`, followed by a snapshot of the reply rules and the original input. Text, voice transcripts, quoted replies, image descriptions, and saved-file notes use the same path. A merged batch carries one marker. Files received without accompanying text or images are saved and acknowledged without starting an AI task.
+When enabled, each submitted WeChat batch starts with `[微信]`, followed by the original input only. Text, voice transcripts, quoted replies, image descriptions, and saved-file notes use the same path. A merged batch carries one marker. Files received without accompanying text or images are saved and acknowledged without starting an AI task.
 
 The bridge identifies its own submitted messages when Pi consumes them. A marker typed in TUI, or `input.source === "extension"` alone, does not establish WeChat origin. This routing also works with the switch off and for follow-ups received during an existing run. With `/wechat config bidirectional off`, TUI replies stay local and WeChat task replies still return to WeChat.
 
@@ -23,15 +23,15 @@ The packaged default is [`prompts/wechat.md`](../prompts/wechat.md). The optiona
 /wechat prompt reload
 ```
 
-`show` displays the loaded template and its path. `init` exports the default and refuses to overwrite an existing file. Edit that file, then run `reload`; the next newly submitted WeChat batch uses the updated rules. Already submitted messages, queued Pi follow-ups, and history retain their original text. A failed reload preserves the last valid template. Removing the override and reloading restores the packaged default.
+`show` displays the loaded template and its path. `init` exports the default and refuses to overwrite an existing file. Edit that file, then run `reload`; the next agent run uses the updated rules (the command waits for the current task to finish). Already submitted messages, queued Pi follow-ups, and history retain their original text. A failed reload preserves the last valid template. Removing the override and reloading restores the packaged default.
 
-The rules ask for short paragraphs, numbered choices, and questions answered through WeChat. Their scope is the current WeChat request and its replies; later inputs from TUI or another source should follow normal Pi behavior.
+The rules ask for short paragraphs, numbered choices, and questions answered through WeChat. They apply only to the current WeChat request and its replies; later inputs from TUI or another source follow normal Pi behavior.
 
 ### System prompts and cache behavior
 
-The extension never changes `systemPrompt` or `systemPromptOptions`. Reply rules are part of each new user message. Changing the template or alternating WeChat/TUI input leaves existing context unchanged.
+While the bridge runs with the source feature on (the default), only agent runs triggered by a bridge submission append the fixed `<wechat-system-rules>` section to the system prompt. The bridge tracks its own submissions, so runs started from the TUI keep a completely clean system prompt with zero WeChat awareness. The section states that the WeChat rules are conditional: they apply only when the latest user request was delivered by the bridge and starts with the source marker. User messages carry only the marker and the original input; history is never rewritten.
 
-Installing the extension without starting the bridge registers no WeChat sending tools. Starting the bridge registers and activates its file/image tools; stopping removes them from the active set. Starting and stopping therefore change the tool set and can affect prompt caching. Enabling/disabling the source feature or alternating input sources does not change that tool set.
+Alternating WeChat and TUI runs adds or removes that section, which can invalidate the provider's cached prefix at that point; consecutive runs from the same channel are unaffected. Toggling the source feature or reloading the template changes only future runs — both commands wait for the current task to finish — so a running reply keeps its original rules. Starting and stopping the bridge still changes the tool set (see below) and can affect prompt caching; the source switch itself does not.
 
 ### Local question tools
 
@@ -43,13 +43,13 @@ For other question tools, list their exact registered names in `config.json`:
 {
   "messageSourceTag": {
     "enabled": true,
-    "wechatTag": "[来源：微信]",
+    "wechatTag": "[微信]",
     "blockedTools": ["question", "questionnaire", "ask_user"]
   }
 }
 ```
 
-`wechatTag` is optional; `[来源：微信]` is the default. Omitting `blockedTools` uses the two official example names; `[]` disables the guard. Other tools that open local UI need their names added explicitly. The template can guide the model but cannot automatically identify every third-party blocking UI tool. Restart Pi after directly editing `config.json`; the TUI source switch takes effect immediately for new submissions.
+`wechatTag` is optional; `[微信]` is the default. Omitting `blockedTools` uses the two official example names; `[]` disables the guard. Other tools that open local UI need their names added explicitly. The template can guide the model but cannot automatically identify every third-party blocking UI tool. Restart Pi after directly editing `config.json`; the TUI source switch updates the system rules for the next run and waits for the current task to finish.
 
 ### WeChat text formatting
 
@@ -67,14 +67,14 @@ References: [Pi 1.2.0 extension contracts](https://github.com/earendil-works/pi/
 
 ## 中文
 
-来源标识、微信回复模板和提问工具守卫共用一个开关，**默认关闭**：
+来源标识、微信回复模板和提问工具守卫共用一个开关，**默认开启**：
 
 ```text
 /wechat config source on
 /wechat config source off
 ```
 
-开启后，每个新投递的微信消息批次以 `[来源：微信]` 开头，随后附带本次回复约定和用户原文。文字、语音转写、引用回复、图片描述及已保存文件的信息统一处理，合并后的批次只加一次。单独收到文件时仍只保存并回执，不触发 AI。
+开启后，每个新投递的微信消息批次以 `[微信]` 开头，随后仅附带用户原文。文字、语音转写、引用回复、图片描述及已保存文件的信息统一处理，合并后的批次只加一次。单独收到文件时仍只保存并回执，不触发 AI。
 
 桥接根据自己的投递记录，在 pi 真正消费消息时判断来源。TUI 手工输入来源标识，或仅有 `input.source === "extension"`，都不会自动被认作微信消息。开关关闭及任务运行中追加消息时，来源路由仍然有效。使用 `/wechat config bidirectional off` 时，电脑端回复不转发，微信任务回复继续正常返回。
 
@@ -88,13 +88,15 @@ References: [Pi 1.2.0 extension contracts](https://github.com/earendil-works/pi/
 /wechat prompt reload
 ```
 
-`show` 查看当前加载的模板及路径；`init` 导出默认模板，不覆盖已有文件。编辑后执行 `reload`，下一条新投递的微信消息使用新规则。已经投递的消息、pi 内部排队的追加消息及历史消息保持原样。加载失败时保留之前的有效模板；删除覆盖文件并重新加载即可恢复内置模板。
+`show` 查看当前加载的模板及路径；`init` 导出默认模板，不覆盖已有文件。编辑后执行 `reload`，下一次任务启动时使用新规则（命令会等待当前任务结束）。已经投递的消息、pi 内部排队的追加消息及历史消息保持原样。加载失败时保留之前的有效模板；删除覆盖文件并重新加载即可恢复内置模板。
 
 模板要求短段落、简单编号，并通过微信正文提问。规则只适用于当前微信请求及其回复，之后的电脑端或其他来源输入按正常 pi 方式处理。
 
 ### 系统提示词和缓存
 
-扩展不修改 `systemPrompt` 或 `systemPromptOptions`，规则直接放在新的用户消息中。编辑模板或微信/TUI 交替输入时，不重写既有上下文。
+桥接运行且来源功能开启（默认）时，只有由桥接投递触发的那次任务才会在系统提示词末尾追加固定的 `<wechat-system-rules>`。桥接依据自己的投递记录判断任务来源，电脑端发起的任务系统提示词完全干净、不含任何微信相关内容。该段明确规则是条件性的：仅当最新用户请求由桥接投递并以来源标识开头时才套用。用户消息只携带来源标识和原文，历史不会被改写。
+
+微信/电脑端交替任务会增删该段，可能使服务商的前缀缓存在该位置失效；连续同渠道任务不受影响。切换来源开关或重载模板只影响之后的任务（两条命令都会等待当前任务结束），进行中的回复保持原规则。启动和停止桥接仍会改变工具集（见下）并可能影响提示词缓存；来源开关本身不会。
 
 仅安装但不启动桥接，不注册微信发送工具。启动时注册并激活文件/图片工具，停止时移出活动工具集。因此，启动和停止会改变工具集，可能影响提示词缓存；切换来源开关或输入渠道不改变工具集。
 
@@ -108,13 +110,13 @@ References: [Pi 1.2.0 extension contracts](https://github.com/earendil-works/pi/
 {
   "messageSourceTag": {
     "enabled": true,
-    "wechatTag": "[来源：微信]",
+    "wechatTag": "[微信]",
     "blockedTools": ["question", "questionnaire", "ask_user"]
   }
 }
 ```
 
-`wechatTag` 可省略，默认 `[来源：微信]`；`blockedTools` 可省略，默认包含两个官方示例名称，设为 `[]` 可以关闭守卫。其他会打开本机界面的工具需要明确添加名称，模板无法自动识别所有第三方阻塞工具。直接修改 `config.json` 后重启 pi；TUI 命令修改来源开关会立即对新投递生效。
+`wechatTag` 可省略，默认 `[微信]`；`blockedTools` 可省略，默认包含两个官方示例名称，设为 `[]` 可以关闭守卫。其他会打开本机界面的工具需要明确添加名称，模板无法自动识别所有第三方阻塞工具。直接修改 `config.json` 后重启 pi；TUI 来源开关在下一次任务启动时更新系统规则，并等待当前任务结束。
 
 ### 微信排版
 

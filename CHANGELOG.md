@@ -8,18 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Optional `[来源：微信]` source marker and user-editable reply template, sharing one switch (off by default), with guards for known local question tools (#16).
-  可选微信来源标识与可编辑回复模板共用一个开关（默认关闭），并守卫已知本机提问工具（#16）。
+- Optional `[微信]` source marker and user-editable reply template, sharing one switch (on by default), with guards for known local question tools (#16).
+  可选微信来源标识与可编辑回复模板共用一个开关（默认开启），并守卫已知本机提问工具（#16）。
 - `/wechat config source on|off` and `/wechat prompt show|init|reload`; published Pi API checks for 0.73.1 through 1.2.0.
   新增来源开关、模板查看/导出/重载命令，以及 pi 0.73.1 至 1.2.0 的已发布 API 检查。
 
 ### Changed
-- Reply rules accompany each new WeChat user message; system prompts stay untouched. Sending tools register on bridge startup and leave the active set on stop.
-  回复规则随每条新微信消息投递，不修改系统提示词；发送工具仅在桥接启动时注册，停止时移出活动工具集。
+- Unframed compact footer with a green WeChat logo (white fallback), a two-way sync arrow, and green/red running/stopped icons; keep routine diagnostics in `/wechat status` and refresh sync indicators immediately.
+  底部去掉方括号，精简为微信绿图标（白色降级）、双向同步箭头和绿/红启停图标；常规诊断留在 `/wechat status`，切换同步立即刷新。
+- Reply rules live in one conditional system-prompt section appended only to runs triggered by a bridge submission; TUI runs keep a clean prompt with zero WeChat awareness, and WeChat user messages carry only the source marker.
+  回复规则放在条件化系统提示词段中，仅追加到桥接投递触发的任务；电脑端任务系统提示词完全不含微信内容，微信用户消息仅携带来源标识。
+- `/wechat status` now reports the latest online/offline state-notification results, and failed lifecycle notifications surface a warning without blocking start/stop.
+  `/wechat status` 新增上/下线状态通知结果，启停状态通知失败时给出警告且不阻断启停。
 - WeChat formatting retains link URLs, converts tables to labelled rows, and sends lossless code chunks with Unicode-safe boundaries.
   微信排版保留完整 URL、将表格转为逐行说明，并支持保留原文的代码分块与 Unicode 安全切分。
 
 ### Fixed
+- Notifications no longer print to stdout while the TUI is attached (debug output painted notify text over the editor); debug logging stays in the debug file.
+  修复 TUI 模式下通知同时打印到 stdout、把文字绘制进输入框区域的问题；调试日志仅写入调试文件。
+- Send WeChat text verbatim instead of trimming it, preserving code-chunk indentation and trailing newlines.
+  发送微信文本不再整体 trim，保留代码块的缩进和末尾换行。
 - Track consumed WeChat follow-ups within an active run and preserve file notes while downloads or earlier submissions are pending.
   修复同一次运行中微信追加消息的来源路由，以及下载或先前投递未完成时文件说明丢失的问题。
 

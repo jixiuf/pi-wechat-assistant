@@ -10,7 +10,7 @@ import { Type } from '@sinclair/typebox'
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
 import { SessionExpiredError, WeixinClient } from './client.js'
 import { acquireLock, releaseLock, loadCredentials, loadConfig, getConfigCache } from './auth.js'
-import { debugLog, isDebugEnabled } from './logger.js'
+import { debugLog } from './logger.js'
 import { splitAndFilterMarkdown } from './message.js'
 import { MessageQueue } from './queue.js'
 import { handleRemoteCommand, type RemoteCommandDeps } from './remote-commands.js'
@@ -26,6 +26,8 @@ import {
 } from './constants.js'
 import type { IncomingMessage } from './types.js'
 import { WechatPrompt } from './wechat-prompt.js'
+import { appendWechatSystemRules, WECHAT_SOURCE_TAG } from './wechat-source.js'
+import { formatWechatStatus } from './status.js'
 
 const WECHAT_TOOL_NAMES = ['send_file_to_wechat', 'send_image_to_wechat']
 
@@ -137,7 +139,6 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     () => wechatFilesDir,
     (content, opts) => pi.sendUserMessage(content as any, opts),
     updateStatusBar,
-    () => wechatPrompt.rules,
     () => !agentPreparing,
   )
 
@@ -147,8 +148,10 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   function notify(message: string, level: 'info' | 'warning' | 'error' = 'info'): void {
     if (latestCtx?.hasUI) {
+      // Never also print to stdout here: in TUI/RPC modes a stray console.log
+      // paints over the interface (it once showed up inside the editor box).
       latestCtx.ui.notify(message, level)
-      if (!isDebugEnabled()) return
+      return
     }
     const printer = level === 'error' ? console.error : console.log
     printer(`[wechat-assistant/${level}] ${message}`)
@@ -157,16 +160,12 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   function updateStatusBar(): void {
     if (!latestCtx?.hasUI) return
     if (!client && !running) { latestCtx.ui.setStatus('wechat', ''); return }
-    if (running) {
-      const pending = queue.pending
-      const context = client?.hasContextToken ? '发送凭据已保存' : '发送凭据未获取'
-      const send = client?.lastSend ? (client.lastSend.success ? 'API发送成功' : '发送失败') : '未尝试发送'
-      latestCtx.ui.setStatus('wechat', `[微信 ▶ 轮询中 | ${context} | ${send}${pending > 0 ? ` | 待处理:${pending}` : ''}]`)
-    } else if (client) {
-      latestCtx.ui.setStatus('wechat', '[微信 ⏸ 未连接]')
-    } else {
-      latestCtx.ui.setStatus('wechat', '[微信 ❌ 未登录]')
-    }
+    latestCtx.ui.setStatus('wechat', formatWechatStatus({
+      running,
+      bidirectional: getConfigCache().bidirectionalSync !== false,
+      pending: queue.pending,
+      sendFailed: client?.lastSend?.success === false,
+    }))
   }
 
   // --- 锁 ---
@@ -225,7 +224,10 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     pollAbort = null
 
     if (wasRunning && client) {
-      await client.notifyStop().catch(error => log(`notifyStop 失败（不阻断停止）: ${formatError(error)}`))
+      await client.notifyStop().catch(error => {
+        log(`notifyStop 失败（不阻断停止）: ${formatError(error)}`)
+        notify(`微信下线状态同步失败，本地桥接已停止：${formatError(error)}。详情见 /wechat status。`, 'warning')
+      })
     }
 
     if (queue.activeRequest && client) {
@@ -238,10 +240,10 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     updateStatusBar()
   }
 
-  // --- 桥接能力：只在启动时注册并激活；回复规则随用户消息投递 ---
+  // --- 桥接能力：只在启动时注册并激活；回复规则固定加入系统提示词 ---
 
   async function prepareBridge(): Promise<void> {
-    if (getConfigCache().messageSourceTag?.enabled === true) await wechatPrompt.load()
+    if (getConfigCache().messageSourceTag?.enabled !== false) await wechatPrompt.load()
     if (!toolsRegistered) registerWechatTools()
     const active = pi.getActiveTools()
     const missing = WECHAT_TOOL_NAMES.filter(name => !active.includes(name))
@@ -251,7 +253,10 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // --- 轮询 ---
 
   async function pollMessages(activeClient: WeixinClient): Promise<void> {
-    await activeClient.notifyStart().catch(error => log(`notifyStart 失败（不阻断启动）: ${formatError(error)}`))
+    await activeClient.notifyStart().catch(error => {
+      log(`notifyStart 失败（不阻断启动）: ${formatError(error)}`)
+      notify(`微信上线状态同步失败，本地桥接继续运行：${formatError(error)}。详情见 /wechat status。`, 'warning')
+    })
     let retryDelay = POLL_RETRY_BASE_MS
     while (running && client === activeClient) {
       try {
@@ -473,11 +478,20 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     }
   })
 
-  // Older Pi versions do not count before_agent_start as busy. Hold new submissions
-  // until agent_start, without changing either form of the system prompt.
-  pi.on('before_agent_start', (_event, ctx) => {
+  // Hold submissions during preparation on older Pi. The rules section is appended
+  // only to runs triggered by a bridge submission; TUI runs keep a clean prompt.
+  pi.on('before_agent_start', (event, ctx) => {
     latestCtx = ctx
     agentPreparing = true
+    const source = getConfigCache().messageSourceTag
+    if (!running || source?.enabled === false || wechatPrompt.rules === null) return
+    // Newer Pi may emit custom-message runs without a prompt text; those cannot
+    // originate from a WeChat submission.
+    const prompt = 'prompt' in event ? event.prompt : ''
+    if (!prompt || !queue.matchesPendingSubmission(prompt)) return
+    return {
+      systemPrompt: appendWechatSystemRules(event.systemPrompt, wechatPrompt.rules, source?.wechatTag?.trim() || WECHAT_SOURCE_TAG),
+    }
   })
 
   // Block known TUI-only question tools for a confirmed WeChat request. Modern

@@ -38,6 +38,7 @@ export interface QueuedMessage {
   fileName?: string
   fileBuffer?: Buffer
   replyProfile?: { blockedTools: string[] }
+  submissionKey?: string
 }
 
 export type Ctx = ExtensionContext | ExtensionCommandContext
@@ -94,6 +95,7 @@ export class MessageQueue {
   pendingInjection: QueuedMessage | null = null
   activeRequest: QueuedMessage | null = null
   private submittedRequests: Array<{ request: QueuedMessage; key: string; inputObserved: boolean }> = []
+  private readonly submittedPromptKeys = new Set<string>()
   private inputSources: Array<{ key: string; request: QueuedMessage | null }> = []
 
   private batchTimer: ReturnType<typeof setTimeout> | null = null
@@ -122,7 +124,6 @@ export class MessageQueue {
       opts?: { deliverAs: 'followUp' },
     ) => void,
     private readonly updateStatusBar: () => void,
-    private readonly getReplyRules: () => string | null = () => null,
     private readonly canSubmit: () => boolean = () => true,
   ) {}
 
@@ -430,12 +431,17 @@ export class MessageQueue {
 
   private submit(content: WechatUserContent, request: QueuedMessage): void {
     const config = getConfigCache().messageSourceTag
-    request.replyProfile = config?.enabled === true
-      ? { blockedTools: [...(config.blockedTools ?? DEFAULT_WECHAT_BLOCKED_TOOLS)] }
+    const enabled = config?.enabled !== false
+    request.replyProfile = enabled
+      ? { blockedTools: [...(config?.blockedTools ?? DEFAULT_WECHAT_BLOCKED_TOOLS)] }
       : undefined
-    const marked = config?.enabled === true
-      ? markWechatSource(content, this.getReplyRules(), config.wechatTag?.trim() || WECHAT_SOURCE_TAG)
+    const marked = enabled
+      ? markWechatSource(content, config?.wechatTag?.trim() || WECHAT_SOURCE_TAG)
       : content
+    // before_agent_start only sees the prompt text: remember it by text key so
+    // the rules section is appended exclusively to WeChat-originated runs.
+    request.submissionKey = contentKey(extractTextFromMessageContent(marked) ?? '')
+    this.submittedPromptKeys.add(request.submissionKey)
     const submission = { request, key: contentKey(marked), inputObserved: false }
     this.submittedRequests.push(submission)
     // Safe both while idle and while Pi is preparing or executing a run.
@@ -472,9 +478,15 @@ export class MessageQueue {
       : item.key === key && !item.inputObserved)
     if (index < 0) return null
     const [{ request }] = this.submittedRequests.splice(index, 1)
+    if (request.submissionKey) this.submittedPromptKeys.delete(request.submissionKey)
     if (this.pendingInjection === request) this.pendingInjection = null
     this.activeRequest = request
     return request
+  }
+
+  /** True while this prompt text belongs to a bridge submission not yet consumed. */
+  matchesPendingSubmission(prompt: string): boolean {
+    return this.submittedPromptKeys.has(contentKey(prompt))
   }
 
   reset(): void {
@@ -482,6 +494,7 @@ export class MessageQueue {
     this.pendingInjection = null
     this.activeRequest = null
     this.submittedRequests.length = 0
+    this.submittedPromptKeys.clear()
     this.inputSources.length = 0
     this.generation++
     this.fileDownloads.clear()

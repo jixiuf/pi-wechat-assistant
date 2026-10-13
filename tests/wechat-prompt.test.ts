@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { WechatPrompt } from '../src/wechat-prompt.js'
-import { markWechatSource, WECHAT_SOURCE_TAG } from '../src/wechat-source.js'
+import { markWechatSource, appendWechatSystemRules, WECHAT_SOURCE_TAG } from '../src/wechat-source.js'
 
 describe('WeChat reply template', () => {
   let directory: string
@@ -23,27 +23,23 @@ describe('WeChat reply template', () => {
     await prompt.load()
     expect(prompt.source).toBe('内置模板')
     expect(prompt.rules).toContain('直接用正文提问')
-    expect(prompt.rules).toContain('后续电脑端')
     await expect(fs.stat(prompt.userPath)).rejects.toHaveProperty('code', 'ENOENT')
   })
 
-  it('snapshots rules into new messages without changing history on reload', async () => {
+  it('exposes the current template for the system rules without channel boilerplate', async () => {
     await fs.writeFile(prompt.userPath, '\uFEFF先给简短结论。')
     await prompt.load()
-    const oldMessage = markWechatSource('用户原文', prompt.rules)
+    expect(prompt.rules).toBe('先给简短结论。')
     await fs.writeFile(prompt.userPath, '先给详细步骤。')
     await prompt.load()
-    expect(prompt.source).toBe('用户模板')
-    expect(markWechatSource('用户原文', prompt.rules)).toContain('先给详细步骤。')
-    expect(oldMessage).toContain('先给简短结论。')
-    expect(oldMessage).not.toContain('先给详细步骤。')
+    expect(prompt.rules).toBe('先给详细步骤。')
     prompt.clear()
     expect(prompt.rules).toBeNull()
   })
 
   it('exports the default once and never overwrites a user template', async () => {
     await prompt.init()
-    expect(await fs.readFile(prompt.userPath, 'utf8')).toContain('当前这条消息来自微信')
+    expect(await fs.readFile(prompt.userPath, 'utf8')).toContain('通过微信阅读和回复')
     await fs.writeFile(prompt.userPath, '我的约定')
     await expect(prompt.init()).rejects.toHaveProperty('code', 'EEXIST')
     expect(await fs.readFile(prompt.userPath, 'utf8')).toBe('我的约定')
@@ -66,7 +62,7 @@ describe('WeChat source prefix', () => {
       { type: 'text' as const, text: '再补充一句' },
     ]
     const original = structuredClone(parts)
-    const marked = markWechatSource(parts, '回复约定')
+    const marked = markWechatSource(parts)
     expect(parts).toEqual(original)
     expect(JSON.stringify(marked).split(WECHAT_SOURCE_TAG)).toHaveLength(2)
     expect(marked[0]).toMatchObject({ text: expect.stringContaining('看一下这张图片\n  原文缩进') })
@@ -77,6 +73,23 @@ describe('WeChat source prefix', () => {
   it('handles image-only input and a custom marker', () => {
     const image = { type: 'image' as const, data: 'image-data', mimeType: 'image/png' }
     expect(markWechatSource([image])).toEqual([{ type: 'text', text: WECHAT_SOURCE_TAG }, image])
-    expect(markWechatSource('你好', null, '[微信]')).toBe('[微信]\n\n你好')
+    expect(markWechatSource('你好', '[微信]')).toBe('[微信]\n\n你好')
+  })
+})
+
+describe('WeChat system rules section', () => {
+  it('appends one conditional section that names the marker and defers routing', () => {
+    const result = appendWechatSystemRules('BASE', '规则A', '[微信]')
+    expect(result.startsWith('BASE\n\n<wechat-system-rules>\n')).toBe(true)
+    expect(result.endsWith('\n</wechat-system-rules>')).toBe(true)
+    expect(result).toContain('规则A')
+    expect(result).toContain(JSON.stringify('[微信]'))
+    expect(result).toContain('仅在当前最新用户请求由微信桥接投递')
+    expect(result).toContain('不因历史里出现过微信消息')
+    expect(result).toContain('电脑端 TUI 或其他来源')
+  })
+
+  it('uses the default marker when none is given', () => {
+    expect(appendWechatSystemRules('BASE', 'R')).toContain(JSON.stringify(WECHAT_SOURCE_TAG))
   })
 })

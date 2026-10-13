@@ -15,12 +15,7 @@ export class WechatPrompt {
 
   get source(): string { return this.origin }
 
-  get rules(): string | null {
-    if (this.template === null) return null
-    return '以下约定仅适用于本条微信请求及其回复。\n'
-      + '后续电脑端或其他来源的用户输入按正常 pi 方式处理，不沿用历史微信消息的约定。\n\n'
-      + this.template
-  }
+  get rules(): string | null { return this.template }
 
   async load(): Promise<void> {
     let template: string
@@ -33,7 +28,7 @@ export class WechatPrompt {
       template = await fs.readFile(DEFAULT_PROMPT_URL, 'utf8')
       origin = '内置模板'
     }
-    // A failed reload leaves the template for future messages intact.
+    // A failed reload leaves the last valid system rules intact.
     this.template = template.replace(/^\uFEFF/, '').trim()
     this.origin = origin
   }

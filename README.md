@@ -70,6 +70,8 @@ Two-way synchronization is enabled by default: new TUI user messages and AI repl
 
 The bridge restores cached reply context and sends the official startup/shutdown notifications. It attempts delivery even without cached context; if a contextual send is rejected with `ret=-2`, it retries once without context. This fallback does not guarantee delivery when WeChat requires fresh user activity. `/wechat status` distinguishes polling state, cached context, and the most recent send API result; cached context does not prove validity, and API success is not a read receipt.
 
+The compact footer has no surrounding brackets and uses a WeChat logo (Nerd Font required), `⇄` only when two-way sync is enabled, and `▶` / `⏸` for running / stopped. Queue counts and send failures appear only when relevant; credentials and successful-send diagnostics remain in `/wechat status`. The logo uses WeChat green (`#07C160`) on truecolor terminals and white otherwise. Running / stopped indicators use green / red (standard ANSI colors on non-truecolor terminals); `NO_COLOR` disables all styling. If your terminal font lacks the logo, start with `PI_WECHAT_STATUS_ICON=text pi` for a text fallback.
+
 ## TUI Commands
 
 All commands use `/wechat` with a subcommand:
@@ -82,7 +84,7 @@ All commands use `/wechat` with a subcommand:
 | `/wechat stop` | Stop and release the lock |
 | `/wechat status` | Show connection status and config |
 | `/wechat config` | View bridge settings |
-| `/wechat config source on\|off` | Toggle WeChat source and reply rules (default **off**) |
+| `/wechat config source on\|off` | Toggle WeChat source and reply rules (default **on**) |
 | `/wechat prompt show` | View the reply template and override path |
 | `/wechat prompt init` | Export the default template without overwriting a user file |
 | `/wechat prompt reload` | Load edited rules for future WeChat submissions |
@@ -92,7 +94,7 @@ All commands use `/wechat` with a subcommand:
 | `/wechat remotetools` | Toggle WeChat-side `/tools` command (default **off**) |
 | `/wechat logout` | Clear credentials and stop |
 
-The optional source feature uses `[来源：微信]` and a user-editable reply template in each new WeChat batch, without changing the system prompt. Installing without starting the bridge registers no sending tools. Replies retain full URLs and send code in separate, lossless chunks. See [source rules, templates, formatting, and compatibility](docs/wechat-source.md).
+The source feature (on by default) marks each new WeChat batch with `[微信]`, while the user-editable reply template lives in a conditional system-prompt section appended only to WeChat-triggered runs — TUI runs keep a clean prompt with zero WeChat awareness. Installing without starting the bridge registers no sending tools. Replies retain full URLs and send code in separate, lossless chunks. See [source rules, templates, formatting, and compatibility](docs/wechat-source.md).
 
 ## WeChat Remote Commands
 
@@ -259,6 +261,8 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 
 启动会恢复已保存的消息发送凭据（`context_token`），并调用官方上线通知；停止时调用下线通知。没有消息发送凭据也会尝试发送；携带该凭据发送被明确以 `ret=-2` 拒绝时，去掉该凭据重试一次。这个兜底不保证绕过微信侧需要新用户消息的限制。`/wechat status` 分别显示登录凭据、轮询状态、消息发送凭据和最近发送接口结果：发送凭据已保存不代表仍有效，接口成功不代表已读。
 
+底部不加方括号，仅保留微信图标（需要 Nerd Font）、`⇄`（仅双向同步开启时显示）及 `▶` / `⏸`（运行 / 停止）。只在有排队消息或发送失败时追加提示；凭据与成功发送详情留在 `/wechat status`。微信图标在真彩色终端使用微信绿（`#07C160`），否则降级为白色；运行 / 停止图标分别为绿色 / 红色（非真彩色终端使用标准 ANSI 颜色）。设置 `NO_COLOR` 可关闭所有着色。字体没有微信图标时，用 `PI_WECHAT_STATUS_ICON=text pi` 启动可切回文字。
+
 ## TUI 命令
 
 | 命令 | 说明 |
@@ -269,7 +273,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 | `/wechat stop` | 停止并释放锁 |
 | `/wechat status` | 查看连接状态和配置 |
 | `/wechat config` | 查看桥接配置 |
-| `/wechat config source on\|off` | 开关微信来源与回复约定（默认**关闭**） |
+| `/wechat config source on\|off` | 开关微信来源与回复约定（默认**开启**） |
 | `/wechat prompt show` | 查看回复模板及用户覆盖路径 |
 | `/wechat prompt init` | 导出默认模板，不覆盖已有用户文件 |
 | `/wechat prompt reload` | 为后续新投递的微信消息加载新规则 |
@@ -279,7 +283,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 | `/wechat remotetools` | 开关微信端 `/tools` 命令（默认**关闭**） |
 | `/wechat logout` | 清除凭证并停止 |
 
-可选来源功能为每个新微信批次添加 `[来源：微信]` 与可编辑回复模板，不修改系统提示词。仅安装而不启动桥接，不注册发送工具。微信回复保留完整链接，代码单独分块并保留原文。详见[来源约定、模板、排版和兼容设计](docs/wechat-source.md#中文)。
+来源功能（默认开启）为每个新微信批次添加 `[微信]`，可编辑回复模板放在条件化的系统提示词段中，仅追加到微信触发的任务；电脑端任务的系统提示词完全不含微信内容。仅安装而不启动桥接，不注册发送工具。微信回复保留完整链接，代码单独分块并保留原文。详见[来源约定、模板、排版和兼容设计](docs/wechat-source.md#中文)。
 
 ## 微信远程命令
 

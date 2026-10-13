@@ -18,7 +18,7 @@ import {
   saveConfig,
   saveCredentials,
 } from './auth.js'
-import { WeixinClient, SessionExpiredError } from './client.js'
+import { WeixinClient, SessionExpiredError, type ApiCallResult } from './client.js'
 import { MessageQueue, getImageBatchWaitMs, getImageMaxBytes } from './queue.js'
 import { renderQrCode, formatError } from './utils.js'
 import { QR_POLL_INTERVAL_MS, QR_MAX_REFRESH } from './constants.js'
@@ -157,19 +157,28 @@ async function cmdStop(_args: string, ctx: Ctx, deps: CommandDeps): Promise<void
   deps.updateStatusBar()
 }
 
+function describeApiResult(result: ApiCallResult | null | undefined, successLabel: string): string {
+  if (!result) return '尚未尝试'
+  const detail = result.success ? successLabel
+    : `失败: ${result.error}${result.code !== undefined ? ` (code=${result.code})` : ''}`
+  return `${detail} @ ${result.at}`
+}
+
 async function cmdStatus(_args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
   deps.setLatestCtx(ctx)
   const activeClient = deps.getClient()
   const config = await loadConfig()
   const lines = [
-    '微信来源与回复约定: ' + (config.messageSourceTag?.enabled === true ? '已开启' : '已关闭（默认）'),
-    '提示词位置: 每条微信消息的上下文，系统提示词不修改',
+    '微信来源与回复约定: ' + (config.messageSourceTag?.enabled === false ? '已关闭' : '已开启（默认）'),
+    '提示词位置: 系统提示词中的固定微信规则（仅作用于当前微信请求）',
     '微信模板: ' + deps.wechatPrompt.source,
     '用户模板路径: ' + deps.wechatPrompt.userPath,
     `运行状态: ${deps.isRunning() ? '✅ 运行中' : '⏸ 已停止'}`,
     `登录凭据: ${activeClient ? '已加载（有效性由接口验证）' : '未加载'}`,
     `消息发送凭据: ${activeClient?.hasContextToken ? '已保存（不代表仍有效）' : '未获取（发送时尝试不携带此凭据）'}`,
-    `最近发送: ${!activeClient?.lastSend ? '尚未尝试' : `${activeClient.lastSend.success ? 'API 返回成功（不代表已读）' : '失败: ' + activeClient.lastSend.error} @ ${activeClient.lastSend.at}`}`,
+    `最近发送: ${describeApiResult(activeClient?.lastSend, 'API 返回成功（不代表已读）')}`,
+    `上线状态通知: ${describeApiResult(activeClient?.lastLifecycle?.start, 'API 返回成功（不代表客户端已更新）')}`,
+    `下线状态通知: ${describeApiResult(activeClient?.lastLifecycle?.stop, 'API 返回成功（不代表客户端已更新）')}`,
     `双向同步: ${config.bidirectionalSync !== false ? '开启' : '关闭（仅微信任务回复）'}`,
     `账号 ID: ${activeClient?.accountId ?? '-'}`,
     `用户 ID: ${activeClient?.userId ?? '-'}`,
@@ -197,7 +206,7 @@ async function cmdLogout(_args: string, ctx: Ctx, deps: CommandDeps): Promise<vo
   deps.updateStatusBar()
 }
 
-async function cmdConfig(args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
+async function cmdConfig(args: string, ctx: ExtensionCommandContext, deps: CommandDeps): Promise<void> {
   deps.setLatestCtx(ctx)
   const [key, value] = args.trim().split(/\s+/)
   const config = await loadConfig()
@@ -206,7 +215,7 @@ async function cmdConfig(args: string, ctx: Ctx, deps: CommandDeps): Promise<voi
       `自动启动: ${config.autoStart ? '已开启' : '已关闭'}`,
       `双向同步: ${config.bidirectionalSync !== false ? '已开启（默认）' : '已关闭'}`,
       `微信 /tools: ${config.allowRemoteTools ? '已开启' : '已关闭（/wechat remotetools on 开启）'}`,
-      `微信来源与回复约定: ${config.messageSourceTag?.enabled === true ? '已开启' : '已关闭（默认）'}`,
+      `微信来源与回复约定: ${config.messageSourceTag?.enabled === false ? '已关闭' : '已开启（默认）'}`,
       `来源标识: ${config.messageSourceTag?.wechatTag?.trim() || WECHAT_SOURCE_TAG}`,
       `图片合并等待: ${getImageBatchWaitMs()}ms`,
       `图片上限: ${Math.round(getImageMaxBytes() / 1024 / 1024)}MB`,
@@ -216,6 +225,10 @@ async function cmdConfig(args: string, ctx: Ctx, deps: CommandDeps): Promise<voi
   }
   if (key === 'source') {
     if (value !== 'on' && value !== 'off') { deps.notify('用法: /wechat config source on|off', 'error'); return }
+    if (!ctx.isIdle()) {
+      deps.notify('等待当前任务结束后更新微信来源与系统回复规则…', 'info')
+      await ctx.waitForIdle()
+    }
     if (value === 'on') {
       try { await deps.wechatPrompt.load() } catch (error) {
         deps.notify('无法加载微信模板: ' + formatError(error), 'error')
@@ -224,13 +237,14 @@ async function cmdConfig(args: string, ctx: Ctx, deps: CommandDeps): Promise<voi
     }
     config.messageSourceTag = { ...config.messageSourceTag, enabled: value === 'on' }
     await saveConfig(config)
-    deps.notify('微信来源与回复约定已' + (value === 'on' ? '开启' : '关闭') + '，从下一条微信消息起生效。', 'info')
+    deps.notify('微信来源与回复约定已' + (value === 'on' ? '开启（默认）' : '关闭') + '，系统规则从下一次任务启动起更新；新微信消息仅附来源标识。', 'info')
     return
   }
   if (key === 'bidirectional') {
     if (value !== 'on' && value !== 'off') { deps.notify('用法: /wechat config bidirectional on|off', 'error'); return }
     config.bidirectionalSync = value === 'on'
     await saveConfig(config)
+    deps.updateStatusBar()
     deps.notify(`双向同步已${config.bidirectionalSync ? '开启' : '关闭'}`, 'info')
     return
   }
@@ -272,15 +286,19 @@ async function cmdRemoteTools(args: string, ctx: Ctx, deps: CommandDeps): Promis
   deps.notify(`微信端 /tools 已${config.allowRemoteTools ? '开启 ✅（注意：微信消息将可修改本机工具权限）' : '关闭 ❌'}`, 'info')
 }
 
-async function cmdPrompt(args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
+async function cmdPrompt(args: string, ctx: ExtensionCommandContext, deps: CommandDeps): Promise<void> {
   deps.setLatestCtx(ctx)
   try {
     if (args === 'init') {
       await deps.wechatPrompt.init()
       deps.notify('已创建微信回复模板: ' + deps.wechatPrompt.userPath + '\n编辑后执行 /wechat prompt reload。', 'info')
     } else if (args === 'reload') {
+      if (!ctx.isIdle()) {
+        deps.notify('等待当前任务结束后重新加载微信系统回复规则…', 'info')
+        await ctx.waitForIdle()
+      }
       await deps.wechatPrompt.load()
-      deps.notify('微信模板已重新加载，从下一条新投递的微信消息起生效；已投递和历史消息不变。', 'info')
+      deps.notify('微信模板已重新加载，下一次任务启动时更新系统规则；历史用户消息不变。', 'info')
     } else if (!args || args === 'show') {
       if (!deps.isRunning() || deps.wechatPrompt.rules === null) await deps.wechatPrompt.load()
       deps.notify('模板来源: ' + deps.wechatPrompt.source + '\n用户模板路径: ' + deps.wechatPrompt.userPath

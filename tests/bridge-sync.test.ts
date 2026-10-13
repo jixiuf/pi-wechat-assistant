@@ -6,7 +6,9 @@ const state = vi.hoisted(() => ({
   queue: null as any,
   client: {
     userId: 'bound-user', accountId: 'bot', lastActiveUserId: null,
-    hasContextToken: false, lastSend: null,
+    hasContextToken: false,
+    lastSend: null as { success: boolean; at: string; error?: string } | null,
+    onStatusChange: undefined as (() => void) | undefined,
     sendText: vi.fn(), notifyStart: vi.fn(), notifyStop: vi.fn(),
     getUpdates: vi.fn(), dispose: vi.fn(), startTyping: vi.fn(), stopTyping: vi.fn(),
   },
@@ -33,6 +35,7 @@ vi.mock('../src/queue.js', async () => {
 })
 import extension from '../src/index.js'
 import { extractTextFromMessageContent } from '../src/utils.js'
+import { WECHAT_STATUS_ICON } from '../src/status.js'
 
 describe('bridge bidirectional sync and lifecycle', () => {
   let handlers: Record<string, (event: any, ctx: any) => any>
@@ -44,7 +47,12 @@ describe('bridge bidirectional sync and lifecycle', () => {
   let oldListeners: Map<string, Function[]>
   beforeEach(async () => {
     vi.clearAllMocks()
+    vi.stubEnv('NO_COLOR', '1')
+    vi.stubEnv('PI_WECHAT_STATUS_ICON', undefined)
     state.config = {}
+    state.client.hasContextToken = false
+    state.client.lastSend = null
+    state.client.onStatusChange = undefined
     state.client.sendText.mockResolvedValue(undefined)
     // No real network, credentials, locks, or user messages.
     state.client.getUpdates.mockImplementation(() => new Promise(() => {}))
@@ -75,6 +83,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
       }
     }
     vi.restoreAllMocks()
+    vi.unstubAllEnvs()
   })
 
   const command = (args: string) => commands.wechat.handler(args, ctx)
@@ -129,11 +138,83 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(activeTools).toHaveLength(4)
   })
 
-  it('shows the default template even while the bridge runs with source rules off', async () => {
+  it('keeps the footer compact before and after acquiring context or sending successfully', async () => {
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⏸`)
     await command('start')
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⇄ ▶`)
+    state.client.hasContextToken = true
+    state.client.onStatusChange?.()
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⇄ ▶`)
+    state.client.lastSend = { success: true, at: '2026-10-13T10:00:00Z' }
+    state.client.onStatusChange?.()
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⇄ ▶`)
+    await command('stop')
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⏸`)
+  })
+
+  it('refreshes the compact sync mode indicator immediately when toggled', async () => {
+    await command('start')
+    await command('config bidirectional off')
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ▶`)
+    await command('config bidirectional on')
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⇄ ▶`)
+  })
+
+  it('shows a queue count only while messages are pending', async () => {
+    await command('start')
+    const pending = vi.spyOn(state.queue, 'pending', 'get').mockReturnValue(3)
+    state.client.onStatusChange?.()
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⇄ ▶ | 待处理:3`)
+    pending.mockReturnValue(0)
+    state.client.onStatusChange?.()
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⇄ ▶`)
+  })
+
+  it('surfaces send failure without error details and clears it on the next successful send', async () => {
+    await command('start')
+    state.client.lastSend = { success: false, at: '2026-10-13T10:00:00Z', error: 'network timeout' }
+    state.client.onStatusChange?.()
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⇄ ▶ | 发送失败`)
+    await command('status')
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining('失败: network timeout'), 'info')
+    state.client.lastSend = { success: true, at: '2026-10-13T10:01:00Z' }
+    state.client.onStatusChange?.()
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⇄ ▶`)
+    await command('status')
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining('API 返回成功（不代表已读）'), 'info')
+  })
+
+  it('combines pending count and send failure without extra mode text, hiding both while stopped', async () => {
+    state.config.bidirectionalSync = false
+    await command('start')
+    vi.spyOn(state.queue, 'pending', 'get').mockReturnValue(2)
+    state.client.lastSend = { success: false, at: '2026-10-13T10:00:00Z', error: 'rejected' }
+    state.client.onStatusChange?.()
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ▶ | 待处理:2 | 发送失败`)
+    await command('stop')
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `${WECHAT_STATUS_ICON} ⏸`)
+  })
+
+  it('shows the default template while the bridge runs with source rules on by default', async () => {
+    await command('start')
+    expect(state.config.messageSourceTag?.enabled === false).toBe(false)
     await command('prompt show')
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('直接用正文提问'), 'info')
-    expect(state.config.messageSourceTag?.enabled).not.toBe(true)
+  })
+
+  it('never prints notifications to stdout while a UI is attached', async () => {
+    const printed: string[] = []
+    const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      printed.push(args.join(' '))
+    })
+    try {
+      await command('start')
+      await command('config source off')
+    } finally {
+      log.mockRestore()
+    }
+    expect(printed.join('')).toBe('')
+    expect(ctx.ui.notify).toHaveBeenCalled()
   })
 
   it('waits for the active run before starting the bridge tools', async () => {
@@ -176,18 +257,38 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(state.client.sendText).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the system prompt and active tools stable when source rules are enabled or inputs alternate', async () => {
+  it('appends WeChat system rules only to runs triggered by a bridge submission', async () => {
     await command('start')
     await command('config source on')
     const tools = [...activeTools]
-    const content = await wechatInput('微信任务', true)
-    expect(content).toMatch(/^\[来源：微信\]/)
-    expect(content).toContain('直接用正文提问')
-    expect(content).toContain('后续电脑端')
-    const event = { systemPrompt: 'unchanged', systemPromptOptions: { sections: { identity: 'unchanged' } }, messageType: 'user', prompt: 'next TUI task' }
-    const original = structuredClone(event)
-    expect(await handlers.before_agent_start(event, ctx)).toBeUndefined()
-    expect(event).toEqual(original)
+    await handlers.input({ source: 'interactive', text: 'TUI task' }, ctx)
+    const tuiEvent = { systemPrompt: 'base system prompt', prompt: 'TUI task' }
+    const tuiOriginal = structuredClone(tuiEvent)
+    expect(await handlers.before_agent_start(tuiEvent, ctx)).toBeUndefined()
+    expect(tuiEvent).toEqual(tuiOriginal)
+    await handlers.agent_start({}, ctx)
+    const calls = sendUserMessage.mock.calls.length
+    state.queue.enqueue({
+      messageId: String(calls), userId: 'bound-user', text: '微信任务', type: 'text', imageUrls: [],
+      raw: { from_user_id: 'bound-user' }, contextToken: '', timestamp: new Date(),
+    })
+    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledTimes(calls + 1))
+    const content = sendUserMessage.mock.calls[calls][0]
+    const sentText = extractTextFromMessageContent(content)!
+    expect(sentText).toMatch(/^\[微信\]/)
+    expect(sentText).not.toContain('直接用正文提问')
+    const result = await handlers.before_agent_start({ systemPrompt: 'base system prompt', prompt: sentText }, ctx)
+    expect(result?.systemPrompt).toMatch(/^base system prompt\n\n<wechat-system-rules>/)
+    expect(result?.systemPrompt).toContain('直接用正文提问')
+    expect(result?.systemPrompt).toContain(JSON.stringify('[微信]'))
+    expect(result?.systemPrompt).toContain('仅在当前最新用户请求由微信桥接投递')
+    await handlers.agent_start({}, ctx)
+    ctx.isIdle.mockReturnValue(false)
+    await handlers.message_start({ message: { role: 'user', content } }, ctx)
+    const after = { systemPrompt: 'base system prompt', prompt: sentText }
+    const afterOriginal = structuredClone(after)
+    expect(await handlers.before_agent_start(after, ctx)).toBeUndefined()
+    expect(after).toEqual(afterOriginal)
     expect(activeTools).toEqual(tools)
     await command('config source off')
     await handlers.agent_start({}, ctx)
@@ -197,19 +298,22 @@ describe('bridge bidirectional sync and lifecycle', () => {
 
   it('does not mistake a TUI marker for an inbound request', async () => {
     state.config.bidirectionalSync = false
+    state.config.messageSourceTag = { enabled: false }
     await command('start')
     await command('config source on')
-    await startRun('[来源：微信]\n\nTUI request')
+    const tuiMarker = '[微信]\n\nTUI request'
+    await handlers.input({ source: 'interactive', text: tuiMarker }, ctx)
+    expect(await handlers.before_agent_start({ systemPrompt: 'base', prompt: tuiMarker }, ctx)).toBeUndefined()
+    await handlers.agent_start({}, ctx)
+    ctx.isIdle.mockReturnValue(false)
+    await handlers.message_start({ message: { role: 'user', content: tuiMarker } }, ctx)
     await reply('local reply')
     expect(state.client.sendText).not.toHaveBeenCalled()
   })
 
-  it('blocks known local question tools only for a confirmed WeChat request with the feature enabled', async () => {
+  it('blocks known local question tools by default for a confirmed WeChat request only', async () => {
     await command('start')
     await wechatInput('微信请求', true)
-    expect(await handlers.tool_call({ toolName: 'question' }, ctx)).toBeUndefined()
-    await command('config source on')
-    await wechatInput('微信提问')
     for (const toolName of ['question', 'questionnaire']) {
       const result = await handlers.tool_call({ toolName, parentToolCallId: 'codemode/1' }, ctx)
       expect(result).toMatchObject({ block: true, reason: expect.stringContaining('回复正文中提问') })
@@ -217,6 +321,9 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(await handlers.tool_call({ toolName: 'read' }, ctx)).toBeUndefined()
     await handlers.input({ source: 'interactive', text: 'TUI request' }, ctx)
     await handlers.message_start({ message: { role: 'user', content: 'TUI request' } }, ctx)
+    expect(await handlers.tool_call({ toolName: 'question' }, ctx)).toBeUndefined()
+    await command('config source off')
+    await wechatInput('关掉后的微信请求')
     expect(await handlers.tool_call({ toolName: 'question' }, ctx)).toBeUndefined()
   })
 
@@ -238,6 +345,17 @@ describe('bridge bidirectional sync and lifecycle', () => {
     await reply('later reply')
     expect(state.client.notifyStop).toHaveBeenCalledTimes(1)
     expect(state.client.sendText).not.toHaveBeenCalled()
+  })
+
+  it('warns and keeps polling when a lifecycle state notification fails', async () => {
+    state.client.notifyStart.mockRejectedValueOnce(new Error('start boom'))
+    await command('start')
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('start boom'), 'warning')
+    await vi.waitFor(() => expect(state.client.getUpdates).toHaveBeenCalled())
+    state.client.notifyStop.mockRejectedValueOnce(new Error('stop boom'))
+    await command('stop')
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('stop boom'), 'warning')
+    expect(ctx.ui.notify).toHaveBeenCalledWith('微信桥接已停止', 'info')
   })
 
   it('formats only the WeChat sending copy and preserves the assistant message', async () => {
