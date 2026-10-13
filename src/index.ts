@@ -480,15 +480,14 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   // Hold submissions during preparation on older Pi. The rules section is appended
   // only to runs triggered by a bridge submission; TUI runs keep a clean prompt.
+  // Hold submissions during preparation on older Pi. Append the same conditional
+  // rules section to every run while the bridge runs; the section itself limits
+  // application to requests that start with the WeChat marker.
   pi.on('before_agent_start', (event, ctx) => {
     latestCtx = ctx
     agentPreparing = true
     const source = getConfigCache().messageSourceTag
     if (!running || source?.enabled === false || wechatPrompt.rules === null) return
-    // Newer Pi may emit custom-message runs without a prompt text; those cannot
-    // originate from a WeChat submission.
-    const prompt = 'prompt' in event ? event.prompt : ''
-    if (!prompt || !queue.matchesPendingSubmission(prompt)) return
     return {
       systemPrompt: appendWechatSystemRules(event.systemPrompt, wechatPrompt.rules, source?.wechatTag?.trim() || WECHAT_SOURCE_TAG),
     }

@@ -261,18 +261,6 @@ describe('WeChat submissions and origin tracking', () => {
     expect(sendUserMessage).toHaveBeenCalledOnce()
   })
 
-  it('reports pending submissions for run-origin checks and clears them once consumed', async () => {
-    vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: true } })
-    const { queue, sendUserMessage } = makeQueue({ client: testClient() })
-    queue.enqueue(makeMsg({ text: '微信任务' }))
-    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    const marked = WECHAT_SOURCE_TAG + '\n\n微信任务'
-    expect(queue.matchesPendingSubmission(marked)).toBe(true)
-    expect(queue.matchesPendingSubmission('别的话')).toBe(false)
-    queue.consumeSubmittedRequest(marked)
-    expect(queue.matchesPendingSubmission(marked)).toBe(false)
-  })
-
   it('discards origin records on stop rather than confusing a later TUI message', async () => {
     const { queue, sendUserMessage } = makeQueue({ client: testClient() })
     queue.enqueue(makeMsg({ text: '旧消息' }))

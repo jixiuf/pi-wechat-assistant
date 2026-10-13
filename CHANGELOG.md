@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Unframed compact footer with a green WeChat logo (white fallback), a two-way sync arrow, and green/red running/stopped icons; keep routine diagnostics in `/wechat status` and refresh sync indicators immediately.
   底部去掉方括号，精简为微信绿图标（白色降级）、双向同步箭头和绿/红启停图标；常规诊断留在 `/wechat status`，切换同步立即刷新。
-- Reply rules live in one conditional system-prompt section appended only to runs triggered by a bridge submission; TUI runs keep a clean prompt with zero WeChat awareness, and WeChat user messages carry only the source marker.
-  回复规则放在条件化系统提示词段中，仅追加到桥接投递触发的任务；电脑端任务系统提示词完全不含微信内容，微信用户消息仅携带来源标识。
+- Reply rules live in one fixed conditional system-prompt section appended to every run while the bridge runs; the section applies them only to requests that start with the WeChat marker, and WeChat user messages carry only the source marker.
+  回复规则放在固定的条件化系统提示词段中，桥接运行期间每次任务都追加；规则仅作用于以微信标识开头的请求，微信用户消息仅携带来源标识。
 - `/wechat status` now reports the latest online/offline state-notification results, and failed lifecycle notifications surface a warning without blocking start/stop.
   `/wechat status` 新增上/下线状态通知结果，启停状态通知失败时给出警告且不阻断启停。
 - WeChat formatting retains link URLs, converts tables to labelled rows, and sends lossless code chunks with Unicode-safe boundaries.

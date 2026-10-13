@@ -94,7 +94,7 @@ All commands use `/wechat` with a subcommand:
 | `/wechat remotetools` | Toggle WeChat-side `/tools` command (default **off**) |
 | `/wechat logout` | Clear credentials and stop |
 
-The source feature (on by default) marks each new WeChat batch with `[微信]`, while the user-editable reply template lives in a conditional system-prompt section appended only to WeChat-triggered runs — TUI runs keep a clean prompt with zero WeChat awareness. Installing without starting the bridge registers no sending tools. Replies retain full URLs and send code in separate, lossless chunks. See [source rules, templates, formatting, and compatibility](docs/wechat-source.md).
+The source feature (on by default) marks each new WeChat batch with `[微信]`, while the user-editable reply template lives in one fixed conditional system-prompt section appended to every run while the bridge runs. Installing without starting the bridge registers no sending tools. Replies retain full URLs and send code in separate, lossless chunks. See [source rules, templates, formatting, and compatibility](docs/wechat-source.md).
 
 ## WeChat Remote Commands
 
@@ -283,7 +283,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 | `/wechat remotetools` | 开关微信端 `/tools` 命令（默认**关闭**） |
 | `/wechat logout` | 清除凭证并停止 |
 
-来源功能（默认开启）为每个新微信批次添加 `[微信]`，可编辑回复模板放在条件化的系统提示词段中，仅追加到微信触发的任务；电脑端任务的系统提示词完全不含微信内容。仅安装而不启动桥接，不注册发送工具。微信回复保留完整链接，代码单独分块并保留原文。详见[来源约定、模板、排版和兼容设计](docs/wechat-source.md#中文)。
+来源功能（默认开启）为每个新微信批次添加 `[微信]`，可编辑回复模板放在一段固定且条件化的系统提示词中，桥接运行期间每次任务都追加。仅安装而不启动桥接，不注册发送工具。微信回复保留完整链接，代码单独分块并保留原文。详见[来源约定、模板、排版和兼容设计](docs/wechat-source.md#中文)。
 
 ## 微信远程命令
 

@@ -257,40 +257,27 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(state.client.sendText).toHaveBeenCalledTimes(1)
   })
 
-  it('appends WeChat system rules only to runs triggered by a bridge submission', async () => {
+  it('appends the same fixed conditional system rules for WeChat and TUI turns while running', async () => {
     await command('start')
     await command('config source on')
     const tools = [...activeTools]
-    await handlers.input({ source: 'interactive', text: 'TUI task' }, ctx)
-    const tuiEvent = { systemPrompt: 'base system prompt', prompt: 'TUI task' }
-    const tuiOriginal = structuredClone(tuiEvent)
-    expect(await handlers.before_agent_start(tuiEvent, ctx)).toBeUndefined()
-    expect(tuiEvent).toEqual(tuiOriginal)
-    await handlers.agent_start({}, ctx)
-    const calls = sendUserMessage.mock.calls.length
-    state.queue.enqueue({
-      messageId: String(calls), userId: 'bound-user', text: '微信任务', type: 'text', imageUrls: [],
-      raw: { from_user_id: 'bound-user' }, contextToken: '', timestamp: new Date(),
-    })
-    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledTimes(calls + 1))
-    const content = sendUserMessage.mock.calls[calls][0]
-    const sentText = extractTextFromMessageContent(content)!
-    expect(sentText).toMatch(/^\[微信\]/)
-    expect(sentText).not.toContain('直接用正文提问')
-    const result = await handlers.before_agent_start({ systemPrompt: 'base system prompt', prompt: sentText }, ctx)
+    const content = await wechatInput('微信任务', true)
+    expect(content).toMatch(/^\[微信\]/)
+    expect(content).not.toContain('直接用正文提问')
+    const event = { systemPrompt: 'base system prompt', systemPromptOptions: { sections: { identity: 'base' } }, messageType: 'user', prompt: 'next TUI task' }
+    const result = await handlers.before_agent_start(event, ctx)
     expect(result?.systemPrompt).toMatch(/^base system prompt\n\n<wechat-system-rules>/)
     expect(result?.systemPrompt).toContain('直接用正文提问')
     expect(result?.systemPrompt).toContain(JSON.stringify('[微信]'))
     expect(result?.systemPrompt).toContain('仅在当前最新用户请求由微信桥接投递')
-    await handlers.agent_start({}, ctx)
-    ctx.isIdle.mockReturnValue(false)
-    await handlers.message_start({ message: { role: 'user', content } }, ctx)
-    const after = { systemPrompt: 'base system prompt', prompt: sentText }
-    const afterOriginal = structuredClone(after)
-    expect(await handlers.before_agent_start(after, ctx)).toBeUndefined()
-    expect(after).toEqual(afterOriginal)
+    const wechatEvent = { systemPrompt: 'base system prompt', prompt: String(content) }
+    expect((await handlers.before_agent_start(wechatEvent, ctx))?.systemPrompt).toBe(result?.systemPrompt)
     expect(activeTools).toEqual(tools)
     await command('config source off')
+    const off = { systemPrompt: 'unchanged' }
+    const original = structuredClone(off)
+    expect(await handlers.before_agent_start(off, ctx)).toBeUndefined()
+    expect(off).toEqual(original)
     await handlers.agent_start({}, ctx)
     expect(await wechatInput('普通输入')).toBe('普通输入')
     expect(activeTools).toEqual(tools)
@@ -301,12 +288,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     state.config.messageSourceTag = { enabled: false }
     await command('start')
     await command('config source on')
-    const tuiMarker = '[微信]\n\nTUI request'
-    await handlers.input({ source: 'interactive', text: tuiMarker }, ctx)
-    expect(await handlers.before_agent_start({ systemPrompt: 'base', prompt: tuiMarker }, ctx)).toBeUndefined()
-    await handlers.agent_start({}, ctx)
-    ctx.isIdle.mockReturnValue(false)
-    await handlers.message_start({ message: { role: 'user', content: tuiMarker } }, ctx)
+    await startRun('[微信]\n\nTUI request')
     await reply('local reply')
     expect(state.client.sendText).not.toHaveBeenCalled()
   })
