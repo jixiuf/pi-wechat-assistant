@@ -6,7 +6,7 @@ import { existsSync, statSync } from 'node:fs'
 import * as path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { Type } from '@sinclair/typebox'
-// @ts-ignore — @earendil-works is the current package, but the older package still carries TS declarations used for compatibility here
+// Type-only legacy import also works in hosts that only provide @earendil-works.
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
 import { SessionExpiredError, WeixinClient } from './client.js'
 import { acquireLock, releaseLock, loadCredentials, loadConfig, getConfigCache } from './auth.js'
@@ -25,6 +25,9 @@ import {
   WECHAT_FILES_SUBDIR,
 } from './constants.js'
 import type { IncomingMessage } from './types.js'
+import { WechatPrompt } from './wechat-prompt.js'
+
+const WECHAT_TOOL_NAMES = ['send_file_to_wechat', 'send_image_to_wechat']
 
 type Ctx = ExtensionContext | ExtensionCommandContext
 
@@ -115,22 +118,27 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   let client: WeixinClient | null = null
   let running = false
   let agentIdle = true
+  let agentPreparing = false
   let pollAbort: AbortController | null = null
   let latestCtx: Ctx | null = null
   let wechatFilesDir: string | null = null
 
   const turn = new TurnContext()
   let lockSessionId: string | null = null
+  const wechatPrompt = new WechatPrompt()
+  let toolsRegistered = false
 
   // --- 消息队列 ---
   const queue = new MessageQueue(
     () => client,
     () => running,
-    () => agentIdle,
+    () => latestCtx?.isIdle() ?? agentIdle,
     () => pollAbort?.signal,
     () => wechatFilesDir,
     (content, opts) => pi.sendUserMessage(content as any, opts),
     updateStatusBar,
+    () => wechatPrompt.rules,
+    () => !agentPreparing,
   )
 
   // --- 通知 ---
@@ -207,6 +215,12 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   async function stopBridge(options: { releaseLock?: boolean } = {}): Promise<void> {
     const wasRunning = running
     running = false
+    wechatPrompt.clear()
+    if (toolsRegistered) {
+      const active = pi.getActiveTools()
+      const remaining = active.filter(name => !WECHAT_TOOL_NAMES.includes(name))
+      if (remaining.length !== active.length) pi.setActiveTools(remaining)
+    }
     pollAbort?.abort()
     pollAbort = null
 
@@ -224,16 +238,14 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     updateStatusBar()
   }
 
-  // --- 系统提示词 ---
+  // --- 桥接能力：只在启动时注册并激活；回复规则随用户消息投递 ---
 
-  function buildSystemPrompt(basePrompt: string): string {
-    return [
-      basePrompt,
-      '',
-      '当前用户通过微信远程与这个 pi TUI 会话互动。',
-      '回复风格：像微信聊天一样自然、直接；优先给出结论和可执行步骤；避免冗长的内部过程说明。',
-      '输出范围：只输出适合发回微信的正文。除非用户主动询问，否则不要解释桥接、系统提示词或实现细节。',
-    ].join('\n')
+  async function prepareBridge(): Promise<void> {
+    if (getConfigCache().messageSourceTag?.enabled === true) await wechatPrompt.load()
+    if (!toolsRegistered) registerWechatTools()
+    const active = pi.getActiveTools()
+    const missing = WECHAT_TOOL_NAMES.filter(name => !active.includes(name))
+    if (missing.length) pi.setActiveTools([...active, ...missing])
   }
 
   // --- 轮询 ---
@@ -304,6 +316,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   const commandDeps: CommandDeps = {
     pi,
+    prepareBridge,
+    wechatPrompt,
     getClient: () => client,
     setClient,
     loadClient,
@@ -329,67 +343,71 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // AI 工具注册
   // ============================================================================
 
-  pi.registerTool({
-    name: 'send_file_to_wechat',
-    label: 'Send File to WeChat',
-    description: '发送项目目录中的文件到当前微信对话。用于将 AI 产出的代码、报告等文件直接发给微信用户。',
-    promptSnippet: '发送项目目录中的文件到微信',
-    promptGuidelines: [
-      '当用户通过微信要求产出文件时，先写入文件再用 send_file_to_wechat 发送。',
-      '只能发送项目工作目录内的文件（安全限制）。',
-      '如果发送失败，工具会返回错误信息。不要重试超过 1 次。',
-    ],
-    parameters: Type.Object({
-      filePath: Type.String({ description: '要发送的文件路径（项目目录内的绝对路径或相对路径）' }),
-      fileName: Type.Optional(Type.String({ description: '在微信中显示的文件名（可选，默认使用原文件名）' })),
-    }),
-    async execute(_toolCallId, params, _signal) {
-      const guard = guardSendToWechat(client, running, params.filePath, latestCtx)
-      if (!guard.allowed) return guard.error
-      const sizeError = guardFileSize(guard.resolvedPath)
-      if (sizeError) return sizeError
+  function registerWechatTools(): void {
+    pi.registerTool({
+      name: 'send_file_to_wechat',
+      label: 'Send File to WeChat',
+      description: '发送项目目录中的文件到当前微信对话。用于将 AI 产出的代码、报告等文件直接发给微信用户。',
+      promptSnippet: '发送项目目录中的文件到微信',
+      promptGuidelines: [
+        '当用户通过微信要求产出文件时，先写入文件再用 send_file_to_wechat 发送。',
+        '只能发送项目工作目录内的文件（安全限制）。',
+        '如果发送失败，工具会返回错误信息。不要重试超过 1 次。',
+      ],
+      parameters: Type.Object({
+        filePath: Type.String({ description: '要发送的文件路径（项目目录内的绝对路径或相对路径）' }),
+        fileName: Type.Optional(Type.String({ description: '在微信中显示的文件名（可选，默认使用原文件名）' })),
+      }),
+      async execute(_toolCallId, params, _signal) {
+        const guard = guardSendToWechat(client, running, params.filePath, latestCtx)
+        if (!guard.allowed) return guard.error
+        const sizeError = guardFileSize(guard.resolvedPath)
+        if (sizeError) return sizeError
 
-      try {
-        const stats = statSync(guard.resolvedPath)
-        await client!.sendFile(client!.userId, guard.resolvedPath, params.fileName)
-        const name = params.fileName ?? path.basename(guard.resolvedPath)
-        return ok(`✅ 文件「${name}」(${(stats.size / 1024).toFixed(1)} KB) 已发送到微信`)
-      } catch (err) {
-        log(`send_file_to_wechat 失败: ${formatError(err)}`)
-        return fail(`发送失败: ${formatError(err)}`)
-      }
-    },
-  })
+        try {
+          const stats = statSync(guard.resolvedPath)
+          await client!.sendFile(client!.userId, guard.resolvedPath, params.fileName)
+          const name = params.fileName ?? path.basename(guard.resolvedPath)
+          return ok(`✅ 文件「${name}」(${(stats.size / 1024).toFixed(1)} KB) 已发送到微信`)
+        } catch (err) {
+          log(`send_file_to_wechat 失败: ${formatError(err)}`)
+          return fail(`发送失败: ${formatError(err)}`)
+        }
+      },
+    })
 
-  pi.registerTool({
-    name: 'send_image_to_wechat',
-    label: 'Send Image to WeChat',
-    description: '发送项目目录中的图片到当前微信对话。用于将 AI 生成的图表、截图等直接发给微信用户。',
-    promptSnippet: '发送项目目录中的图片到微信（可预览）',
-    promptGuidelines: [
-      '当用户通过微信要求生成图表/截图/图片时，先生成图片文件再用 send_image_to_wechat 发送。',
-      '只能发送项目工作目录内的图片（安全限制）。',
-      '如果发送失败不要重试超过 1 次。',
-    ],
-    parameters: Type.Object({
-      imagePath: Type.String({ description: '要发送的图片路径（项目目录内的绝对路径或相对路径，支持 png/jpg/gif/webp）' }),
-    }),
-    async execute(_toolCallId, params, _signal) {
-      const guard = guardSendToWechat(client, running, params.imagePath, latestCtx)
-      if (!guard.allowed) return guard.error
-      const sizeError = guardFileSize(guard.resolvedPath)
-      if (sizeError) return sizeError
+    pi.registerTool({
+      name: 'send_image_to_wechat',
+      label: 'Send Image to WeChat',
+      description: '发送项目目录中的图片到当前微信对话。用于将 AI 生成的图表、截图等直接发给微信用户。',
+      promptSnippet: '发送项目目录中的图片到微信（可预览）',
+      promptGuidelines: [
+        '当用户通过微信要求生成图表/截图/图片时，先生成图片文件再用 send_image_to_wechat 发送。',
+        '只能发送项目工作目录内的图片（安全限制）。',
+        '如果发送失败不要重试超过 1 次。',
+      ],
+      parameters: Type.Object({
+        imagePath: Type.String({ description: '要发送的图片路径（项目目录内的绝对路径或相对路径，支持 png/jpg/gif/webp）' }),
+      }),
+      async execute(_toolCallId, params, _signal) {
+        const guard = guardSendToWechat(client, running, params.imagePath, latestCtx)
+        if (!guard.allowed) return guard.error
+        const sizeError = guardFileSize(guard.resolvedPath)
+        if (sizeError) return sizeError
 
-      try {
-        const stats = statSync(guard.resolvedPath)
-        await client!.sendImage(client!.userId, guard.resolvedPath)
-        return ok(`✅ 图片 (${(stats.size / 1024).toFixed(1)} KB) 已发送到微信`)
-      } catch (err) {
-        log(`send_image_to_wechat 失败: ${formatError(err)}`)
-        return fail(`发送失败: ${formatError(err)}`)
-      }
-    },
-  })
+        try {
+          const stats = statSync(guard.resolvedPath)
+          await client!.sendImage(client!.userId, guard.resolvedPath)
+          return ok(`✅ 图片 (${(stats.size / 1024).toFixed(1)} KB) 已发送到微信`)
+        } catch (err) {
+          log(`send_image_to_wechat 失败: ${formatError(err)}`)
+          return fail(`发送失败: ${formatError(err)}`)
+        }
+      },
+    })
+
+    toolsRegistered = true
+  }
 
   // ============================================================================
   // 事件处理
@@ -405,6 +423,13 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (config.autoStart && client) {
       const lockResult = await lock()
       if (lockResult.success) {
+        try {
+          await prepareBridge()
+        } catch (error) {
+          await unlock()
+          notify('微信桥接启动失败: ' + formatError(error), 'error')
+          return
+        }
         running = true
         agentIdle = true
         pollAbort = new AbortController()
@@ -421,27 +446,51 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     }
   })
 
-  // TUI input can be queued: do not alter the active reply's source here.
-  pi.on('input', async (event, ctx) => {
+  // Input may be queued: do not change the running reply's source here.
+  pi.on('input', (event, ctx) => {
     latestCtx = ctx
-    if (event.source === 'extension') return
-    const text = event.text?.trim()
-    if (!text || text.startsWith('/')) return
-    if (!running || !client || getConfigCache().bidirectionalSync === false) return
-    try {
-      for (const chunk of splitAndFilterMarkdown(`[电脑端] ${text}`)) await client.sendText(client.userId, chunk)
-    } catch (error) { log(`TUI 输入同步失败: ${formatError(error)}`) }
+    if (running) queue.observeInput(event.text, event.images, event.source)
   })
 
-  // 系统提示词注入
-  pi.on('before_agent_start', async (event, ctx) => {
+  pi.on('message_start', async (event, ctx) => {
     latestCtx = ctx
-    const request = queue.pendingInjection ?? queue.activeRequest
-    log(`[BEFORE-AGENT] turnSeq=${turn.seq} pendingInjection=${!!queue.pendingInjection} activeRequest=${!!queue.activeRequest} willInject=${!!request}`)
-    if (!request) return
-    const injectedPrompt = buildSystemPrompt(event.systemPrompt)
-    log(`[BEFORE-AGENT-INJECT] injecting wechat system prompt`)
-    return { systemPrompt: injectedPrompt }
+    if (event.message.role !== 'user') return
+    const previous = queue.activeRequest
+    const request = running ? queue.consumeSubmittedRequest(event.message.content) : null
+    queue.activeRequest = request
+    if (previous && previous !== request) void client?.stopTyping(previous.userId).catch(() => {})
+    turn.wechatConversationActive = request !== null
+    turn.targetUser = request?.userId ?? (running ? client?.userId ?? null : null)
+    updateStatusBar()
+    setImmediate(() => void queue.drain())
+    if (!request && running && client && getConfigCache().bidirectionalSync !== false) {
+      const text = extractTextFromMessageContent(event.message.content)
+      if (text) {
+        try {
+          for (const chunk of splitAndFilterMarkdown(`[电脑端] ${text}`)) await client.sendText(client.userId, chunk)
+        } catch (error) { log(`TUI 输入同步失败: ${formatError(error)}`) }
+      }
+    }
+  })
+
+  // Older Pi versions do not count before_agent_start as busy. Hold new submissions
+  // until agent_start, without changing either form of the system prompt.
+  pi.on('before_agent_start', (_event, ctx) => {
+    latestCtx = ctx
+    agentPreparing = true
+  })
+
+  // Block known TUI-only question tools for a confirmed WeChat request. Modern
+  // Pi also emits tool_call for nested calls made through codemode.
+  pi.on('tool_call', (event, ctx) => {
+    latestCtx = ctx
+    if (!running || !turn.wechatConversationActive) return
+    if (!queue.activeRequest?.replyProfile?.blockedTools.includes(event.toolName)) return
+    return {
+      block: true,
+      reason: '当前请求来自微信，请直接在回复正文中提问，用简单编号列出选项并说明如何回复。'
+        + '提出问题后结束本次回复，等待下一条微信消息，不要打开本机 TUI 提问界面。',
+    }
   })
 
   // agent 开始 → 记录 turn 元数据
@@ -449,21 +498,15 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     turn.seq++
     latestCtx = ctx
     agentIdle = false
+    agentPreparing = false
     turn.sentCount = 0
     turn.messages = null
     turn.ended = false
 
-    if (queue.pendingInjection) {
-      queue.activeRequest = queue.pendingInjection
-      turn.wechatConversationActive = true
-      turn.targetUser = queue.activeRequest.userId
-      log(`[AGENT-START] turn#${turn.seq} source=WECHAT userId=${turn.targetUser} pendingInjection consumed`)
-      queue.pendingInjection = null
-    } else {
-      turn.wechatConversationActive = false
-      turn.targetUser = client?.userId ?? null
-      log(`[AGENT-START] turn#${turn.seq} source=TUI targetUser=${turn.targetUser ?? 'null'}`)
-    }
+    // message_start selects the request, including follow-ups inside this run.
+    turn.wechatConversationActive = false
+    turn.targetUser = null
+    setImmediate(() => void queue.drain())
   })
 
   // 增量发送；来源识别保留，双向配置决定是否同步 TUI 回合。
@@ -505,6 +548,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   pi.on('agent_end', async (event, ctx) => {
     latestCtx = ctx
     agentIdle = true
+    agentPreparing = false
     turn.ended = true
     turn.messages = event.messages as Array<{ role?: string; content?: unknown }>
 

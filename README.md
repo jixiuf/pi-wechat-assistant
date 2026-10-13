@@ -81,12 +81,18 @@ All commands use `/wechat` with a subcommand:
 | `/wechat start` | Start the WeChat connection |
 | `/wechat stop` | Stop and release the lock |
 | `/wechat status` | Show connection status and config |
-| `/wechat config` | View image-related settings |
+| `/wechat config` | View bridge settings |
+| `/wechat config source on\|off` | Toggle WeChat source and reply rules (default **off**) |
+| `/wechat prompt show` | View the reply template and override path |
+| `/wechat prompt init` | Export the default template without overwriting a user file |
+| `/wechat prompt reload` | Load edited rules for future WeChat submissions |
 | `/wechat config image-wait <ms>` | Set batch wait time (default `8000`) |
 | `/wechat config image-max <MB>` | Set per-image size limit (default `50`) |
 | `/wechat autostart` | Toggle auto-start on session begin |
 | `/wechat remotetools` | Toggle WeChat-side `/tools` command (default **off**) |
 | `/wechat logout` | Clear credentials and stop |
+
+The optional source feature uses `[来源：微信]` and a user-editable reply template in each new WeChat batch, without changing the system prompt. Installing without starting the bridge registers no sending tools. Replies retain full URLs and send code in separate, lossless chunks. See [source rules, templates, formatting, and compatibility](docs/wechat-source.md).
 
 ## WeChat Remote Commands
 
@@ -133,6 +139,7 @@ Advanced: `/thinking`, `/compact`. WeChat-side `/tools` is **disabled by default
 ~/.pi/agent/wechat-assistant/
 ├── credentials.json    # Login credentials (mode 600)
 ├── config.json         # Auto-start, remote tools, image limits (mode 600)
+├── wechat-prompt.md     # Optional user reply template
 ├── context-tokens.json # Reply context for the bound user (mode 600)
 ├── cursor.json         # Long-poll cursor (mode 600)
 ├── seen-ids.json       # Recent message IDs for deduplication (mode 600)
@@ -179,6 +186,7 @@ git clone https://github.com/shenjiecode/pi-wechat-assistant.git
 cd pi-wechat-assistant
 npm install
 npm run typecheck
+npm run typecheck:pi  # Published Pi APIs: 0.73.1, 0.78.0, 0.99.2, 1.1.0, 1.2.0
 
 # Quick test
 pi -e ./src/index.ts
@@ -260,12 +268,18 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 | `/wechat start` | 启动微信连接 |
 | `/wechat stop` | 停止并释放锁 |
 | `/wechat status` | 查看连接状态和配置 |
-| `/wechat config` | 查看图片相关设置 |
+| `/wechat config` | 查看桥接配置 |
+| `/wechat config source on\|off` | 开关微信来源与回复约定（默认**关闭**） |
+| `/wechat prompt show` | 查看回复模板及用户覆盖路径 |
+| `/wechat prompt init` | 导出默认模板，不覆盖已有用户文件 |
+| `/wechat prompt reload` | 为后续新投递的微信消息加载新规则 |
 | `/wechat config image-wait <ms>` | 设置图片批量等待时间，默认 `8000` |
 | `/wechat config image-max <MB>` | 设置单张图片大小上限，默认 `50` |
 | `/wechat autostart` | 开关自动启动 |
 | `/wechat remotetools` | 开关微信端 `/tools` 命令（默认**关闭**） |
 | `/wechat logout` | 清除凭证并停止 |
+
+可选来源功能为每个新微信批次添加 `[来源：微信]` 与可编辑回复模板，不修改系统提示词。仅安装而不启动桥接，不注册发送工具。微信回复保留完整链接，代码单独分块并保留原文。详见[来源约定、模板、排版和兼容设计](docs/wechat-source.md#中文)。
 
 ## 微信远程命令
 
@@ -312,6 +326,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 ~/.pi/agent/wechat-assistant/
 ├── credentials.json    # 登录凭证（权限 600）
 ├── config.json         # 自动启动、远程工具、图片限制（权限 600）
+├── wechat-prompt.md     # 可选的用户回复模板
 ├── context-tokens.json # 绑定用户的消息发送凭据（权限 600）
 ├── cursor.json         # 长轮询游标（权限 600）
 ├── seen-ids.json       # 去重用的近期消息 ID（权限 600）
@@ -348,6 +363,7 @@ git clone https://github.com/shenjiecode/pi-wechat-assistant.git
 cd pi-wechat-assistant
 npm install
 npm run typecheck
+npm run typecheck:pi  # 检查 pi 0.73.1、0.78.0、0.99.2、1.1.0、1.2.0 的已发布 API
 
 # 快速测试
 pi -e ./src/index.ts
@@ -424,6 +440,8 @@ WeChatでボットを見つけて、メッセージを送るだけです。
 | `/wechat stop` | 停止してロックを解放 |
 | `/wechat status` | 接続状態と設定を表示 |
 | `/wechat config` | 画像関連設定を表示 |
+| `/wechat config source on\|off` | WeChatの送信元表示と返信ルールを切替（デフォルト無効） |
+| `/wechat prompt show\|init\|reload` | 返信テンプレートの表示・作成・再読込 |
 | `/wechat config image-wait <ms>` | バッチ待機時間を設定（デフォルト `8000`） |
 | `/wechat config image-max <MB>` | 画像サイズ上限を設定（デフォルト `50`） |
 | `/wechat autostart` | セッション開始時の自動起動を切替 |
@@ -587,6 +605,8 @@ WeChat에서 봇을 찾아 메시지를 보내기만 하면 됩니다.
 | `/wechat stop` | 중지 및 잠금 해제 |
 | `/wechat status` | 연결 상태 및 설정 표시 |
 | `/wechat config` | 이미지 관련 설정 표시 |
+| `/wechat config source on\|off` | WeChat 출처 및 응답 규칙 전환 (기본 비활성화) |
+| `/wechat prompt show\|init\|reload` | 응답 템플릿 보기, 생성, 다시 로드 |
 | `/wechat config image-wait <ms>` | 배치 대기 시간 설정 (기본값 `8000`) |
 | `/wechat config image-max <MB>` | 이미지 크기 제한 설정 (기본값 `50`) |
 | `/wechat autostart` | 세션 시작 시 자동 시작 전환 |

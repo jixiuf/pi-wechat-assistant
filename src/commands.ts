@@ -22,11 +22,15 @@ import { WeixinClient, SessionExpiredError } from './client.js'
 import { MessageQueue, getImageBatchWaitMs, getImageMaxBytes } from './queue.js'
 import { renderQrCode, formatError } from './utils.js'
 import { QR_POLL_INTERVAL_MS, QR_MAX_REFRESH } from './constants.js'
+import type { WechatPrompt } from './wechat-prompt.js'
+import { WECHAT_SOURCE_TAG } from './wechat-source.js'
 
 type Ctx = ExtensionContext | ExtensionCommandContext
 
 export interface CommandDeps {
   pi: ExtensionAPI
+  prepareBridge: () => Promise<void>
+  wechatPrompt: WechatPrompt
   getClient: () => WeixinClient | null
   setClient: (c: WeixinClient | null) => void
   loadClient: () => Promise<WeixinClient | null>
@@ -118,13 +122,24 @@ async function cmdLogin(args: string, ctx: Ctx, deps: CommandDeps): Promise<void
   }
 }
 
-async function cmdStart(_args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
+async function cmdStart(_args: string, ctx: ExtensionCommandContext, deps: CommandDeps): Promise<void> {
   deps.setLatestCtx(ctx)
   const activeClient = await deps.loadClient()
   if (!activeClient) { deps.notify('未找到微信凭证，请先执行 /wechat login', 'error'); return }
   if (deps.isRunning()) { deps.notify('微信桥接已经在运行', 'info'); return }
+  if (!ctx.isIdle()) {
+    deps.notify('等待当前任务结束后启动微信桥接…', 'info')
+    await ctx.waitForIdle()
+  }
   const lockResult = await deps.lock()
   if (!lockResult.success) { deps.notify(lockResult.message, 'error'); return }
+  try {
+    await deps.prepareBridge()
+  } catch (error) {
+    await deps.unlock()
+    deps.notify('微信桥接启动失败: ' + formatError(error), 'error')
+    return
+  }
   deps.setRunning(true)
   const pollAbort = new AbortController()
   deps.setPollAbort(pollAbort)
@@ -147,6 +162,10 @@ async function cmdStatus(_args: string, ctx: Ctx, deps: CommandDeps): Promise<vo
   const activeClient = deps.getClient()
   const config = await loadConfig()
   const lines = [
+    '微信来源与回复约定: ' + (config.messageSourceTag?.enabled === true ? '已开启' : '已关闭（默认）'),
+    '提示词位置: 每条微信消息的上下文，系统提示词不修改',
+    '微信模板: ' + deps.wechatPrompt.source,
+    '用户模板路径: ' + deps.wechatPrompt.userPath,
     `运行状态: ${deps.isRunning() ? '✅ 运行中' : '⏸ 已停止'}`,
     `登录凭据: ${activeClient ? '已加载（有效性由接口验证）' : '未加载'}`,
     `消息发送凭据: ${activeClient?.hasContextToken ? '已保存（不代表仍有效）' : '未获取（发送时尝试不携带此凭据）'}`,
@@ -187,10 +206,25 @@ async function cmdConfig(args: string, ctx: Ctx, deps: CommandDeps): Promise<voi
       `自动启动: ${config.autoStart ? '已开启' : '已关闭'}`,
       `双向同步: ${config.bidirectionalSync !== false ? '已开启（默认）' : '已关闭'}`,
       `微信 /tools: ${config.allowRemoteTools ? '已开启' : '已关闭（/wechat remotetools on 开启）'}`,
+      `微信来源与回复约定: ${config.messageSourceTag?.enabled === true ? '已开启' : '已关闭（默认）'}`,
+      `来源标识: ${config.messageSourceTag?.wechatTag?.trim() || WECHAT_SOURCE_TAG}`,
       `图片合并等待: ${getImageBatchWaitMs()}ms`,
       `图片上限: ${Math.round(getImageMaxBytes() / 1024 / 1024)}MB`,
-      '', '用法:', '/wechat config bidirectional on|off', '/wechat config image-wait 8000', '/wechat config image-max 50',
+      '', '用法:', '/wechat config source on|off', '/wechat config bidirectional on|off', '/wechat config image-wait 8000', '/wechat config image-max 50',
     ].join('\n'), 'info')
+    return
+  }
+  if (key === 'source') {
+    if (value !== 'on' && value !== 'off') { deps.notify('用法: /wechat config source on|off', 'error'); return }
+    if (value === 'on') {
+      try { await deps.wechatPrompt.load() } catch (error) {
+        deps.notify('无法加载微信模板: ' + formatError(error), 'error')
+        return
+      }
+    }
+    config.messageSourceTag = { ...config.messageSourceTag, enabled: value === 'on' }
+    await saveConfig(config)
+    deps.notify('微信来源与回复约定已' + (value === 'on' ? '开启' : '关闭') + '，从下一条微信消息起生效。', 'info')
     return
   }
   if (key === 'bidirectional') {
@@ -207,7 +241,7 @@ async function cmdConfig(args: string, ctx: Ctx, deps: CommandDeps): Promise<voi
   } else if (key === 'image-max') {
     config.imageMaxBytes = Math.round(numeric * 1024 * 1024)
   } else {
-    deps.notify('未知配置项。支持: bidirectional, image-wait, image-max', 'error')
+    deps.notify('未知配置项。支持: source, bidirectional, image-wait, image-max', 'error')
     return
   }
   await saveConfig(config)
@@ -238,9 +272,30 @@ async function cmdRemoteTools(args: string, ctx: Ctx, deps: CommandDeps): Promis
   deps.notify(`微信端 /tools 已${config.allowRemoteTools ? '开启 ✅（注意：微信消息将可修改本机工具权限）' : '关闭 ❌'}`, 'info')
 }
 
+async function cmdPrompt(args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
+  deps.setLatestCtx(ctx)
+  try {
+    if (args === 'init') {
+      await deps.wechatPrompt.init()
+      deps.notify('已创建微信回复模板: ' + deps.wechatPrompt.userPath + '\n编辑后执行 /wechat prompt reload。', 'info')
+    } else if (args === 'reload') {
+      await deps.wechatPrompt.load()
+      deps.notify('微信模板已重新加载，从下一条新投递的微信消息起生效；已投递和历史消息不变。', 'info')
+    } else if (!args || args === 'show') {
+      if (!deps.isRunning() || deps.wechatPrompt.rules === null) await deps.wechatPrompt.load()
+      deps.notify('模板来源: ' + deps.wechatPrompt.source + '\n用户模板路径: ' + deps.wechatPrompt.userPath
+        + '\n\n' + (deps.wechatPrompt.rules ?? ''), 'info')
+    } else {
+      deps.notify('用法: /wechat prompt show|init|reload', 'warning')
+    }
+  } catch (error) {
+    deps.notify('微信模板操作失败: ' + formatError(error), 'error')
+  }
+}
+
 export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
   pi.registerCommand('wechat', {
-    description: '微信桥接管理：login | start | stop | status | config | logout | autostart | remotetools',
+    description: '微信桥接管理：login | start | stop | status | prompt | config | logout | autostart | remotetools',
     handler: async (args, ctx) => {
       const [sub, ...rest] = args.trim().split(/\s+/)
       const restArgs = rest.join(' ')
@@ -250,6 +305,9 @@ export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
         '/wechat start             启动桥接',
         '/wechat stop              停止桥接',
         '/wechat status            查看状态',
+        '/wechat prompt show       查看微信回复模板',
+        '/wechat prompt init       创建用户模板（不覆盖已有文件）',
+        '/wechat prompt reload     重新加载模板',
         '/wechat config            查看/设置配置',
         '/wechat logout            清除凭证并停止',
         '/wechat autostart         开关自动启动',
@@ -260,6 +318,7 @@ export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
         case 'start': return cmdStart(restArgs, ctx, deps)
         case 'stop': return cmdStop(restArgs, ctx, deps)
         case 'status': return cmdStatus(restArgs, ctx, deps)
+        case 'prompt': return cmdPrompt(restArgs, ctx, deps)
         case 'config': return cmdConfig(restArgs, ctx, deps)
         case 'logout': return cmdLogout(restArgs, ctx, deps)
         case 'autostart': return cmdAutostart(restArgs, ctx, deps)

@@ -2,7 +2,7 @@
 // 消息队列 + 批处理
 // ============================================================================
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
 import { debugLog } from './logger.js'
 import { WeixinClient } from './client.js'
@@ -14,10 +14,11 @@ import {
   DEFAULT_IMAGE_MAX_BYTES,
   MAX_IMAGE_PREFETCH_CONCURRENCY,
 } from './constants.js'
-import { summarizePreview, formatError } from './utils.js'
+import { summarizePreview, formatError, extractTextFromMessageContent } from './utils.js'
 import { redactUrl } from './logger.js'
 import type { IncomingMessage } from './types.js'
 import { getConfigCache } from './auth.js'
+import { markWechatSource, WECHAT_SOURCE_TAG, DEFAULT_WECHAT_BLOCKED_TOOLS, type WechatUserContent } from './wechat-source.js'
 
 // --- 类型 ---
 
@@ -36,9 +37,18 @@ export interface QueuedMessage {
   fileAesKey?: string
   fileName?: string
   fileBuffer?: Buffer
+  replyProfile?: { blockedTools: string[] }
 }
 
 export type Ctx = ExtensionContext | ExtensionCommandContext
+
+function contentKey(content: unknown): string {
+  const text = extractTextFromMessageContent(content) ?? ''
+  const images = Array.isArray(content)
+    ? content.filter(part => part?.type === 'image').map(part => [part.mimeType, part.data])
+    : []
+  return createHash('sha256').update(JSON.stringify([text, images])).digest('hex')
+}
 
 // --- 配置读取（同步，基于内存缓存） ---
 
@@ -83,10 +93,14 @@ export class MessageQueue {
   readonly queue: QueuedMessage[] = []
   pendingInjection: QueuedMessage | null = null
   activeRequest: QueuedMessage | null = null
+  private submittedRequests: Array<{ request: QueuedMessage; key: string; inputObserved: boolean }> = []
+  private inputSources: Array<{ key: string; request: QueuedMessage | null }> = []
 
   private batchTimer: ReturnType<typeof setTimeout> | null = null
   private imageBatchAckSent = false
   private _draining = false
+  private generation = 0
+  private fileDownloads = new Set<Promise<void>>()
 
   /** 待注入的已保存文件列表（文件不进入队列和 AI 注入，等文字/图片触发时拼接） */
   private accumulatedFiles: Array<{ name: string; size: number; path: string }> = []
@@ -108,6 +122,8 @@ export class MessageQueue {
       opts?: { deliverAs: 'followUp' },
     ) => void,
     private readonly updateStatusBar: () => void,
+    private readonly getReplyRules: () => string | null = () => null,
+    private readonly canSubmit: () => boolean = () => true,
   ) {}
 
   // --- 入队 ---
@@ -131,7 +147,11 @@ export class MessageQueue {
 
     // 文件：立即下载保存 + 自动回复，不入队，不参与计时器
     if (hasFile) {
-      void this._handleFile(message)
+      const download = this._handleFile(message, this.generation).catch(error => {
+        log(`[FILE-ERROR] ${formatError(error)}`)
+      })
+      this.fileDownloads.add(download)
+      void download.finally(() => this.fileDownloads.delete(download))
     }
 
     // 文字部分
@@ -190,12 +210,13 @@ export class MessageQueue {
   }
 
   /** 文件处理：下载 → 保存到项目目录 → 自动回复 → 累积 */
-  private async _handleFile(message: IncomingMessage): Promise<void> {
+  private async _handleFile(message: IncomingMessage, generation: number): Promise<void> {
     const log = debugLog
     const client = this.getClient()
     const fileName = message.fileName ?? '未知文件'
 
     const buffer = await fetchFile(message.fileEncryptParam!, message.fileAesKey, this.getPollSignal())
+    if (generation !== this.generation || !this.isRunning()) return
     if (!buffer) {
       log(`[FILE-DL-FAIL] ${fileName}`)
       if (client) void client.sendText(message.userId, `⚠️ 文件下载失败: ${fileName}`).catch(() => {})
@@ -208,6 +229,7 @@ export class MessageQueue {
       return
     }
     const savedPath = await saveFileToDisk(buffer, fileName, wechatFilesDir)
+    if (generation !== this.generation || !this.isRunning()) return
     if (!savedPath) {
       log(`[FILE-SAVE-FAIL] 保存失败: ${fileName}`)
       return
@@ -255,11 +277,27 @@ export class MessageQueue {
     // 防重入保护
     if (this._draining) { log(`[DRAIN-SKIP] already draining`); return }
     this._draining = true
+    const generation = this.generation
 
     try {
       await this._doDrain()
+    } catch (error) {
+      if (generation !== this.generation) return
+      log(`[DRAIN-ERROR] ${formatError(error)}`)
+      const request = this.pendingInjection
+      this.pendingInjection = null
+      if (request) {
+        void this.getClient()?.stopTyping(request.userId).catch(() => {})
+        void this.getClient()?.sendText(request.userId, '⚠️ 消息投递失败，请重新发送。').catch(() => {})
+      }
     } finally {
+      if (generation !== this.generation) return
       this._draining = false
+      // Messages received during downloads or the acknowledgement must not wait
+      // for agent_end if this run can accept a follow-up already.
+      if (this.queue.length && this.isRunning() && this.getClient() && !this.pendingInjection && !this.batchTimer && this.canSubmit()) {
+        setImmediate(() => void this.drain())
+      }
     }
   }
 
@@ -267,16 +305,23 @@ export class MessageQueue {
     const log = debugLog
     const client = this.getClient()
 
-    const pendingFiles = this.accumulatedFiles.splice(0)
-
-    log(`[DRAIN-ENTER] running=${this.isRunning()} client=${!!client} queue=${this.queue.length} pendingFiles=${pendingFiles.length} pendingInjection=${!!this.pendingInjection} activeRequest=${!!this.activeRequest} agentIdle=${this.getAgentIdle()} batchTimer=${!!this.batchTimer}`)
+    log(`[DRAIN-ENTER] running=${this.isRunning()} client=${!!client} queue=${this.queue.length} pendingInjection=${!!this.pendingInjection} activeRequest=${!!this.activeRequest} agentIdle=${this.getAgentIdle()} batchTimer=${!!this.batchTimer}`)
     if (!this.isRunning() || !client) { log(`[DRAIN-SKIP] not running or no client`); return }
     if (this.pendingInjection) { log(`[DRAIN-SKIP] pendingInjection already set`); return }
     if (this.batchTimer) { log(`[DRAIN-SKIP] 批处理计时器运行中`); return }
-    if (this.queue.length === 0 && pendingFiles.length === 0) { log(`[DRAIN-SKIP] queue empty and no pending files`); return }
+    if (!this.canSubmit()) { log(`[DRAIN-SKIP] agent preparing`); return }
+    if (this.queue.length === 0) { log(`[DRAIN-SKIP] queue empty`); return }
+
+    // File and text parts may arrive together. Wait for the current downloads so
+    // their saved paths accompany this batch, rather than a later unrelated turn.
+    const generation = this.generation
+    await Promise.all([...this.fileDownloads])
+    if (generation !== this.generation || !this.isRunning() || !this.canSubmit() || this.batchTimer) return
 
     const batch = this.queue.splice(0)
     if (batch.length === 0) { log(`[DRAIN-SKIP] queue empty after splice`); return }
+
+    const pendingFiles = this.accumulatedFiles.splice(0)
 
     log(`[DRAIN-BATCH] msgs=${batch.length} pendingFiles=${pendingFiles.length}`)
     this.imageBatchAckSent = false
@@ -307,6 +352,14 @@ export class MessageQueue {
         if (imageData) images.push(imageData)
       }
     }
+    if (generation !== this.generation || !this.isRunning()) return
+    if (!this.canSubmit()) {
+      this.queue.unshift(...batch)
+      this.accumulatedFiles.unshift(...files)
+      this.pendingInjection = null
+      void client.stopTyping(first.userId).catch(() => {})
+      return
+    }
 
     const hasImages = images.length > 0
     const hadImageMessages = batch.some(msg => !!msg.imageUrl)
@@ -326,6 +379,9 @@ export class MessageQueue {
 
     if (hasFiles && !hasImages && !hasText) {
       log(`[DRAIN-FILES-ONLY] no text or images, skipping AI injection`)
+      this.accumulatedFiles.unshift(...files)
+      this.pendingInjection = null
+      void client.stopTyping(first.userId).catch(() => {})
       this.updateStatusBar()
       return
     }
@@ -334,9 +390,8 @@ export class MessageQueue {
       const combinedText = texts.join('\n') + fileNote
       const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [{ type: 'text', text: combinedText }]
       for (const img of images) content.push({ type: 'image', data: img.data, mimeType: img.mediaType })
-      const deliverOpts = isBusy ? { deliverAs: 'followUp' as const } : undefined
-      log(`[DRAIN-SEND] file+text, files=${files.length}, images=${images.length}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
-      this.sendUserMessage(content, deliverOpts)
+      log(`[DRAIN-SEND] file+text, files=${files.length}, images=${images.length}, mode=followUp`)
+      this.submit(content, first)
     } else if (hasImages) {
       const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = []
       if (!hasText) {
@@ -345,13 +400,11 @@ export class MessageQueue {
         content.push({ type: 'text', text: texts.join('\n') })
       }
       for (const img of images) content.push({ type: 'image', data: img.data, mimeType: img.mediaType })
-      const deliverOpts = isBusy ? { deliverAs: 'followUp' as const } : undefined
-      log(`[DRAIN-SEND] image+text, images=${images.length}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
-      this.sendUserMessage(content, deliverOpts)
+      log(`[DRAIN-SEND] image+text, images=${images.length}, mode=followUp`)
+      this.submit(content, first)
     } else if (hasText) {
-      const deliverOpts = isBusy ? { deliverAs: 'followUp' as const } : undefined
-      log(`[DRAIN-SEND] text, text=${texts.join(' ').slice(0, 80)}, mode=${deliverOpts?.deliverAs ?? 'direct'}`)
-      this.sendUserMessage(texts.join('\n'), deliverOpts)
+      log(`[DRAIN-SEND] text, text=${texts.join(' ').slice(0, 80)}, mode=followUp`)
+      this.submit(texts.join('\n'), first)
     } else {
       if (hadImageMessages) {
         const limitMB = Math.round(getImageMaxBytes() / 1024 / 1024)
@@ -375,10 +428,63 @@ export class MessageQueue {
 
   // --- 重置 ---
 
+  private submit(content: WechatUserContent, request: QueuedMessage): void {
+    const config = getConfigCache().messageSourceTag
+    request.replyProfile = config?.enabled === true
+      ? { blockedTools: [...(config.blockedTools ?? DEFAULT_WECHAT_BLOCKED_TOOLS)] }
+      : undefined
+    const marked = config?.enabled === true
+      ? markWechatSource(content, this.getReplyRules(), config.wechatTag?.trim() || WECHAT_SOURCE_TAG)
+      : content
+    const submission = { request, key: contentKey(marked), inputObserved: false }
+    this.submittedRequests.push(submission)
+    // Safe both while idle and while Pi is preparing or executing a run.
+    try {
+      this.sendUserMessage(marked, { deliverAs: 'followUp' })
+    } catch (error) {
+      this.submittedRequests = this.submittedRequests.filter(item => item !== submission)
+      this.inputSources = this.inputSources.filter(item => item.request !== request)
+      if (this.pendingInjection === request) this.pendingInjection = null
+      void this.getClient()?.stopTyping(request.userId).catch(() => {})
+      void this.getClient()?.sendText(request.userId, '⚠️ 消息投递失败，请重新发送。').catch(() => {})
+      throw error
+    }
+  }
+
+  /** Input origin is useful only together with a matching bridge submission. */
+  observeInput(text: string, images: unknown[] | undefined, source: string): void {
+    const key = contentKey([{ type: 'text', text }, ...(images ?? [])])
+    const submitted = source === 'extension'
+      ? this.submittedRequests.find(item => item.key === key && !item.inputObserved)
+      : undefined
+    if (submitted) submitted.inputObserved = true
+    this.inputSources.push({ key, request: submitted?.request ?? null })
+  }
+
+  /** Match only this bridge's submissions, when Pi actually consumes the message. */
+  consumeSubmittedRequest(content: unknown): QueuedMessage | null {
+    const key = contentKey(content)
+    const inputIndex = this.inputSources.findIndex(item => item.key === key)
+    const input = inputIndex >= 0 ? this.inputSources.splice(inputIndex, 1)[0] : undefined
+    if (input && !input.request) return null
+    const index = this.submittedRequests.findIndex(item => input
+      ? item.request === input.request
+      : item.key === key && !item.inputObserved)
+    if (index < 0) return null
+    const [{ request }] = this.submittedRequests.splice(index, 1)
+    if (this.pendingInjection === request) this.pendingInjection = null
+    this.activeRequest = request
+    return request
+  }
+
   reset(): void {
     this.queue.length = 0
     this.pendingInjection = null
     this.activeRequest = null
+    this.submittedRequests.length = 0
+    this.inputSources.length = 0
+    this.generation++
+    this.fileDownloads.clear()
     this.imageBatchAckSent = false
     this.accumulatedFiles = []
     this._draining = false

@@ -27,6 +27,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "typecheck:pi": "node scripts/check-pi-compat.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "preversion": "npm run typecheck && npm test",
@@ -38,6 +39,8 @@
   "files": [
     "index.ts",
     "src",
+    "prompts",
+    "docs",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"
@@ -45,7 +48,8 @@
   "pi": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "prompts": []
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

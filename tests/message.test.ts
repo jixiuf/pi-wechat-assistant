@@ -48,16 +48,26 @@ describe('splitAndFilterMarkdown', () => {
     expect(splitAndFilterMarkdown('`code` here')).toEqual(['code here'])
   })
 
-  it('filters code blocks', () => {
+  it('sends code separately from the surrounding prose', () => {
     const input = 'Before\n```\ncode block\n```\nAfter'
     const result = splitAndFilterMarkdown(input)
-    expect(result[0]).toContain('Before')
-    expect(result[0]).toContain('code block')
-    expect(result[0]).toContain('After')
+    expect(result).toEqual(['Before', '代码 (1/1)\ncode block\n', 'After'])
   })
 
-  it('filters links, keeps text', () => {
-    expect(splitAndFilterMarkdown('[click here](https://example.com)')).toEqual(['click here'])
+  it('keeps link labels and the complete destination', () => {
+    expect(splitAndFilterMarkdown('[click here](https://example.com)')).toEqual(['click here: https://example.com'])
+  })
+
+  it('supports titled links and autolinks without retaining their Markdown wrapper', () => {
+    expect(splitAndFilterMarkdown('[文档](https://example.com/a_b "标题") 和 <https://example.com/x>'))
+      .toEqual(['文档: https://example.com/a_b 和 https://example.com/x'])
+    expect(splitAndFilterMarkdown('[文档](<https://example.com/a_b>)'))
+      .toEqual(['文档: https://example.com/a_b'])
+  })
+
+  it('strips underscore emphasis and thematic rules without altering identifiers', () => {
+    expect(splitAndFilterMarkdown('__结论__ 和 _斜体_ 与 some_name\n***\n下一段'))
+      .toEqual(['结论 和 斜体 与 some_name\n\n下一段'])
   })
 
   it('converts unordered lists to bullets', () => {
@@ -111,5 +121,60 @@ describe('splitAndFilterMarkdown', () => {
     expect(result[0]).toContain('A')
     expect(result[0]).toContain('B')
     expect(result[0]).toContain('C')
+  })
+
+  it('preserves code whitespace and Markdown-looking syntax across multiple chunks', () => {
+    const code = '  # heading\n\n    value = "**bold** *italic* [url](https://example.com/a_b)"\n'.repeat(24)
+    const chunks = splitAndFilterMarkdown('```python\n' + code + '```')
+    expect(chunks.length).toBeGreaterThan(1)
+    expect(chunks.every(chunk => chunk.length <= 800 && chunk.startsWith('代码 (python)'))).toBe(true)
+    expect(chunks.map(chunk => chunk.slice(chunk.indexOf('\n') + 1)).join('')).toBe(code)
+  })
+
+  it('preserves a long code line, CRLF, and Unicode when its blocks are reassembled', () => {
+    const code = '  ' + '👩🏽‍💻e\u0301'.repeat(160) + '\r\n  end\r\n'
+    const chunks = splitAndFilterMarkdown('~~~js\r\n' + code + '~~~')
+    const parts = chunks.map(chunk => chunk.slice(chunk.indexOf('\n') + 1))
+    expect(parts.join('')).toBe(code)
+    for (const part of parts) expect(part.replaceAll('👩🏽‍💻e\u0301', '').replace(/\s|end/g, '')).toBe('')
+  })
+
+  it('supports nested fences and an unfinished streaming code block', () => {
+    expect(splitAndFilterMarkdown('````markdown\n```python\n# x\n```\n````'))
+      .toEqual(['代码 (markdown) (1/1)\n```python\n# x\n```\n'])
+    expect(splitAndFilterMarkdown('```js\n  const x = "**";'))
+      .toEqual(['代码 (js) (1/1)\n  const x = "**";'])
+  })
+
+  it('protects literal Markdown and URLs in inline code', () => {
+    expect(splitAndFilterMarkdown('`a_b **x** | [x](y)` 和 https://example.com/a_b?q=**x**'))
+      .toEqual(['a_b **x** | [x](y) 和 https://example.com/a_b?q=**x**'])
+    expect(splitAndFilterMarkdown('[文档](https://example.com/a_(b)?q=a_b)'))
+      .toEqual(['文档: https://example.com/a_(b)?q=a_b'])
+  })
+
+  it('keeps an indivisible long URL whole and splits prose around it', () => {
+    const url = 'https://example.com/' + 'a'.repeat(900)
+    const chunks = splitAndFilterMarkdown('开始 ' + url + ' 结束')
+    expect(chunks).toEqual(['开始', url, '结束'])
+  })
+
+  it('splits prose without breaking emoji or combining sequences', () => {
+    const input = '👨‍👩‍👧‍👦e\u0301🇨🇳'.repeat(180)
+    const chunks = splitAndFilterMarkdown(input)
+    expect(chunks.join('')).toBe(input)
+    for (const chunk of chunks) expect(chunk.replaceAll('👨‍👩‍👧‍👦', '').replaceAll('e\u0301', '').replaceAll('🇨🇳', '')).toBe('')
+  })
+
+  it('converts a table into labelled rows while preserving inline code and links', () => {
+    const table = '| 名称 | 内容 |\n| --- | --- |\n| 第一项 | `a|b` |\n| 第二项 | [文档](https://example.com/a_b) |'
+    expect(splitAndFilterMarkdown(table)).toEqual([
+      '名称: 第一项\n内容: a|b\n\n名称: 第二项\n内容: 文档: https://example.com/a_b',
+    ])
+  })
+
+  it('preserves escaped pipes in table cells', () => {
+    expect(splitAndFilterMarkdown('| 名称 | 内容 |\n| --- | --- |\n| 规则 | a\\|b |'))
+      .toEqual(['名称: 规则\n内容: a|b'])
   })
 })

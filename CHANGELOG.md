@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Optional `[来源：微信]` source marker and user-editable reply template, sharing one switch (off by default), with guards for known local question tools (#16).
+  可选微信来源标识与可编辑回复模板共用一个开关（默认关闭），并守卫已知本机提问工具（#16）。
+- `/wechat config source on|off` and `/wechat prompt show|init|reload`; published Pi API checks for 0.73.1 through 1.2.0.
+  新增来源开关、模板查看/导出/重载命令，以及 pi 0.73.1 至 1.2.0 的已发布 API 检查。
+
+### Changed
+- Reply rules accompany each new WeChat user message; system prompts stay untouched. Sending tools register on bridge startup and leave the active set on stop.
+  回复规则随每条新微信消息投递，不修改系统提示词；发送工具仅在桥接启动时注册，停止时移出活动工具集。
+- WeChat formatting retains link URLs, converts tables to labelled rows, and sends lossless code chunks with Unicode-safe boundaries.
+  微信排版保留完整 URL、将表格转为逐行说明，并支持保留原文的代码分块与 Unicode 安全切分。
+
+### Fixed
+- Track consumed WeChat follow-ups within an active run and preserve file notes while downloads or earlier submissions are pending.
+  修复同一次运行中微信追加消息的来源路由，以及下载或先前投递未完成时文件说明丢失的问题。
+
 ## [0.3.1] - 2026-09-04
 
 ### Security

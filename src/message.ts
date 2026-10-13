@@ -1,152 +1,157 @@
-// ============================================================================
-// 消息处理工具：Markdown 分段 + 语法过滤
-// ============================================================================
-
-/**
- * 将 Markdown 文本按结构分段，每段过滤掉 Markdown 语法。
- *
- * 分段策略：
- * 1. 按 Markdown 标题（#、##、### 等）分段
- * 2. 按水平分割线（---）分段
- * 3. 按空行（双换行）分段
- * 4. 每段过滤 Markdown 语法变成纯文本
- * 5. 兜底长度检查：超长段落按换行二次切割
- * 6. 过短的段落与下一段合并
- */
-
+// WeChat receives plain text. Protect code and URLs before formatting prose.
 const DEFAULT_CHUNK_SIZE = 800
-const MIN_CHUNK_SIZE = 100 // 过短的段合并到下一段
+const MIN_CHUNK_SIZE = 100
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+type Block = { kind: 'text'; text: string } | { kind: 'code'; text: string; language: string }
 
 export function splitAndFilterMarkdown(text: string, maxChunkSize = DEFAULT_CHUNK_SIZE): string[] {
-  const rawSections = splitByMarkdownStructure(text)
-  const filtered = rawSections.map(filterMarkdownSyntax).map(s => s.trim()).filter(Boolean)
-
-  // 合并过短的段落
-  const merged = mergeShortSections(filtered, MIN_CHUNK_SIZE)
-
-  // 兜底长度切割
+  if (!Number.isFinite(maxChunkSize) || maxChunkSize < 80) throw new RangeError('Chunk size must be at least 80')
+  const limit = Math.floor(maxChunkSize)
   const result: string[] = []
-  for (const section of merged) {
-    if (section.length <= maxChunkSize) {
-      result.push(section)
+  for (const block of parseBlocks(text)) {
+    if (block.kind === 'code') {
+      const prefix = '代码' + (block.language ? ' (' + block.language + ')' : '')
+      const parts = splitLongText(block.text, limit - prefix.length - 20, true)
+      result.push(...parts.map((part, i) => prefix + ' (' + (i + 1) + '/' + parts.length + ')\n' + part))
     } else {
-      result.push(...splitLongSection(section, maxChunkSize))
+      const sections = splitSections(formatProse(block.text))
+      const merged: string[] = []
+      let current = ''
+      for (const section of sections) {
+        if (current && current.length >= MIN_CHUNK_SIZE) {
+          merged.push(current)
+          current = section
+        } else current = current ? current + '\n\n' + section : section
+      }
+      if (current) merged.push(current)
+      for (const section of merged) result.push(...splitLongText(section, limit, false))
     }
   }
-
   return result
 }
 
-// --- Markdown 结构分段 ---
-
-function splitByMarkdownStructure(text: string): string[] {
-  const lines = text.split('\n')
-  const sections: string[] = []
-  let current: string[] = []
-
-  for (const line of lines) {
-    // 标题行作为分段点（但不包含在内容中）
-    if (/^#{1,6}\s/.test(line)) {
-      if (current.length > 0) {
-        sections.push(current.join('\n'))
-        current = []
-      }
-      // 去掉 # 前缀，保留标题文字
-      current.push(line.replace(/^#{1,6}\s+/, ''))
+function parseBlocks(text: string): Block[] {
+  const blocks: Block[] = []
+  let plain = ''
+  let code: Extract<Block, { kind: 'code' }> | null = null
+  let closing: RegExp | null = null
+  for (const line of text.split(/(?<=\n)/)) {
+    if (code) {
+      if (closing!.test(line)) {
+        blocks.push(code)
+        code = null
+      } else code.text += line
       continue
     }
-
-    // 水平分割线
-    if (/^---+\s*$/.test(line) || /^\*\*\*+\s*$/.test(line) || /^___+\s*$/.test(line)) {
-      if (current.length > 0) {
-        sections.push(current.join('\n'))
-        current = []
-      }
-      continue
-    }
-
-    current.push(line)
+    const fence = /^ {0,3}(\u0060{3,}|~{3,})([^\r\n]*)\r?\n?$/.exec(line)
+    if (fence) {
+      if (plain) blocks.push({ kind: 'text', text: plain })
+      plain = ''
+      const language = fence[2].trim().split(/\s+/)[0].replace(/[^\w.+-]/g, '').slice(0, 24)
+      code = { kind: 'code', text: '', language }
+      closing = new RegExp('^ {0,3}' + fence[1][0] + '{' + fence[1].length + ',}[ \\t]*(?:\\r?\\n)?$')
+    } else plain += line
   }
-
-  if (current.length > 0) {
-    sections.push(current.join('\n'))
-  }
-
-  return sections
+  if (code) blocks.push(code)
+  if (plain) blocks.push({ kind: 'text', text: plain })
+  return blocks
 }
 
-// --- Markdown 语法过滤 ---
-
-function filterMarkdownSyntax(text: string): string {
-  return text
-    // 代码块 → 保留内容
-    .replace(/```[\w]*\n?/g, '')
-    .replace(/```/g, '')
-    // 粗体
+function formatProse(text: string): string {
+  const literals: string[] = []
+  const protect = (value: string): string => '\u0000' + (literals.push(value) - 1) + '\u0000'
+  let formatted = text
+    .replace(/(\u0060+)([\s\S]*?)\1/g, (_match, _fence, content: string) => protect(content))
+    .replace(/(!?)\[([^\]\n]+)\]\(([^()\s]+(?:\([^()\n]*\)[^()\s]*)*)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'))?\)/g,
+      (_match, image: string, label: string, url: string) => {
+        const destination = url.replace(/^<|>$/g, '')
+        if (label === destination) return protect(destination)
+        return (image ? '图片 ' : '') + label + ': ' + protect(destination)
+      })
+    .replace(/<(https?:\/\/[^<>\s]+)>/g, (_match, url: string) => protect(url))
+    .replace(/https?:\/\/[^\s\u0000<>]+/g, (url: string) => protect(url))
+    .replace(/^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/gm, '\n')
     .replace(/\*\*(.+?)\*\*/g, '$1')
-    // 斜体
     .replace(/\*(.+?)\*/g, '$1')
-    // 行内代码
-    .replace(/`([^`]+)`/g, '$1')
-    // 链接 → 只保留文字
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    // 有序列表
-    .replace(/^(\d+)\.\s+/gm, '$1. ')
-    // 无序列表 → 用 bullet
+    .replace(/(?<!\w)__(\S(?:.*?\S)?)__(?!\w)/g, '$1')
+    .replace(/(?<!\w)_(\S(?:.*?\S)?)_(?!\w)/g, '$1')
     .replace(/^[-*+]\s+/gm, '• ')
+  formatted = formatTables(formatted)
+  return formatted.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => literals[Number(index)])
 }
 
-// --- 合并短段落 ---
-
-function mergeShortSections(sections: string[], minLength: number): string[] {
-  if (sections.length === 0) return []
-
+function formatTables(text: string): string {
+  const lines = text.split('\n')
+  const cells = (line: string): string[] => line.trim().replace(/^\||(?<!\\)\|$/g, '')
+    .split(/(?<!\\)\|/).map(cell => cell.trim().replace(/\\\|/g, '|'))
   const result: string[] = []
-  let buffer = sections[0]
-
-  for (let i = 1; i < sections.length; i++) {
-    const section = sections[i]
-    if (buffer.length < minLength) {
-      buffer = buffer + '\n\n' + section
-    } else {
-      result.push(buffer)
-      buffer = section
-    }
+  for (let i = 0; i < lines.length; i++) {
+    const separator = lines[i + 1]
+    if (lines[i].includes('|') && separator?.includes('|') && cells(separator).every(cell => /^:?-{3,}:?$/.test(cell))) {
+      const headers = cells(lines[i])
+      i += 2
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
+        result.push(cells(lines[i]).map((value, index) => (headers[index] || '列 ' + (index + 1)) + ': ' + value).join('\n'), '')
+        i++
+      }
+      i--
+    } else result.push(lines[i])
   }
+  return result.join('\n')
+}
 
-  if (buffer.trim()) {
-    result.push(buffer)
+function splitSections(text: string): string[] {
+  const result: string[] = []
+  let current: string[] = []
+  const flush = () => {
+    const section = current.join('\n').trim()
+    if (section) result.push(section)
+    current = []
   }
-
+  for (const line of text.split('\n')) {
+    if (/^#{1,6}\s/.test(line)) {
+      flush()
+      current.push(line.replace(/^#{1,6}\s+/, ''))
+    } else if (!line.trim() || /^---+\s*$/.test(line) || /^\*\*\*+\s*$/.test(line) || /^___+\s*$/.test(line)) flush()
+    else current.push(line)
+  }
+  flush()
   return result
 }
 
-// --- 超长段落二次切割 ---
-
-function splitLongSection(text: string, maxLen: number): string[] {
-  const chunks: string[] = []
-  let remaining = text.trim()
-
-  while (remaining.length > maxLen) {
-    // 优先在换行处切
-    let splitAt = remaining.lastIndexOf('\n', maxLen)
-    if (splitAt < maxLen / 2) {
-      // 其次在空格处切
-      splitAt = remaining.lastIndexOf(' ', maxLen)
-    }
-    if (splitAt < maxLen / 2) {
-      // 硬切
-      splitAt = maxLen
-    }
-
-    const chunk = remaining.slice(0, splitAt).trim()
-    if (chunk) chunks.push(chunk)
-    remaining = remaining.slice(splitAt).trim()
+function safeBoundary(text: string, limit: number): number {
+  let end = 0
+  for (const { index, segment } of graphemes.segment(text)) {
+    if (index + segment.length > limit) return end || segment.length
+    end = index + segment.length
   }
+  return end
+}
 
-  if (remaining) {
-    chunks.push(remaining)
+function splitLongText(text: string, limit: number, code: boolean): string[] {
+  const result: string[] = []
+  let remaining = code ? text : text.trim()
+  while (remaining.length > limit) {
+    let cut = safeBoundary(remaining, limit)
+    const newline = remaining.lastIndexOf('\n', cut - 1) + 1
+    if (newline > 0 && (code || newline >= cut / 2)) cut = newline
+    else if (!code) {
+      const space = remaining.lastIndexOf(' ', cut - 1) + 1
+      if (space >= cut / 2) cut = space
+    }
+    if (!code) {
+      // An indivisible URL may exceed the target size; send it whole rather than break it.
+      for (const match of remaining.matchAll(/https?:\/\/\S+/g)) {
+        const start = match.index!
+        const end = start + match[0].length
+        if (start < cut && end > cut) { cut = start || end; break }
+      }
+    }
+    const part = remaining.slice(0, cut)
+    if (code || part.trim()) result.push(code ? part : part.trim())
+    remaining = code ? remaining.slice(cut) : remaining.slice(cut).trim()
   }
-
-  return chunks
+  if (code ? remaining.length > 0 : remaining.trim().length > 0) result.push(code ? remaining : remaining.trim())
+  return result
 }
