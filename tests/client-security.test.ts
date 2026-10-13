@@ -75,6 +75,46 @@ describe('WeixinClient sender authorization', () => {
     mocks.saveSeenIds.mockResolvedValue(undefined)
   })
 
+  it('drains an in-flight send and rejects new sends until resumed', async () => {
+    const client = await WeixinClient.create(credentials)
+    let finish!: () => void
+    mocks.sendMessage.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+    const sending = client.sendText('bound-user', 'already sending')
+    let drained = false
+    const paused = client.pauseSending().then(() => { drained = true })
+    await expect(client.sendText('bound-user', 'too late')).rejects.toThrow('已停止')
+    expect(drained).toBe(false)
+    finish()
+    await Promise.all([sending, paused])
+    expect(drained).toBe(true)
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1)
+    client.resumeSending()
+    await client.sendText('bound-user', 'restarted')
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(2)
+  })
+
+  it('reloads cursor and seen IDs after another owner advanced them', async () => {
+    const client = await WeixinClient.create(credentials)
+    mocks.loadCursor.mockResolvedValue('new-cursor')
+    mocks.loadSeenIds.mockResolvedValue(new Set(['already-processed']))
+    await client.reloadReceiveState()
+    mocks.apiGetUpdates.mockResolvedValue({ msgs: [rawMessage('already-processed', 'bound-user')] })
+    await expect(client.getUpdates()).resolves.toEqual([])
+    expect(mocks.apiGetUpdates).toHaveBeenCalledWith(credentials.baseUrl, credentials.token, 'new-cursor', undefined)
+  })
+
+  it('does not persist a response delivered after poll cancellation', async () => {
+    const client = await WeixinClient.create(credentials)
+    const abort = new AbortController()
+    mocks.apiGetUpdates.mockImplementationOnce(async () => {
+      abort.abort()
+      return { get_updates_buf: 'late', msgs: [rawMessage('late-message', 'bound-user')] }
+    })
+    await expect(client.getUpdates(abort.signal)).resolves.toEqual([])
+    expect(mocks.saveCursor).not.toHaveBeenCalled()
+    expect(mocks.saveSeenIds).not.toHaveBeenCalled()
+  })
+
   it('drops an unbound sender before caching context or producing a message', async () => {
     mocks.apiGetUpdates.mockResolvedValue({
       get_updates_buf: 'cursor-1',

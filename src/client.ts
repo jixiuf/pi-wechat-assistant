@@ -179,6 +179,12 @@ export class WeixinClient {
   }
 
   private async _init(): Promise<void> {
+    await this.reloadReceiveState()
+  }
+
+  /** Reload only after owning the bridge lock; a previous owner may have advanced it. */
+  async reloadReceiveState(): Promise<void> {
+    this.contextTokens.clear()
     const persisted = await loadContextTokens()
     // context token 只允许属于当前扫码凭证绑定用户，避免旧凭证或旧版本
     // 留下的其他用户状态被继续使用。
@@ -249,12 +255,34 @@ export class WeixinClient {
   /** 退出前确保 context tokens 落盘 */
   async dispose(): Promise<void> {
     this._disposed = true
+    await this.flushReceiveState()
+  }
+
+  async flushReceiveState(): Promise<void> {
     if (this._contextTokensDirty) {
       const tokens: Record<string, string> = {}
       for (const [k, v] of this.contextTokens) tokens[k] = v
       await flushContextTokens({ lastUserId: this._lastActiveUserId, tokens })
       this._contextTokensDirty = false
     }
+  }
+
+  private sendingEnabled = true
+  private pendingSends = new Set<Promise<void>>()
+
+  resumeSending(): void { this.sendingEnabled = true }
+
+  async pauseSending(): Promise<void> {
+    this.sendingEnabled = false
+    await Promise.allSettled([...this.pendingSends])
+  }
+
+  private trackSend(send: () => Promise<void>): Promise<void> {
+    if (!this.sendingEnabled) return Promise.reject(new Error('微信桥接已停止，发送工具不可用'))
+    const task = send()
+    this.pendingSends.add(task)
+    void task.finally(() => this.pendingSends.delete(task)).catch(() => {})
+    return task
   }
 
   // --- 消息接收 ---
@@ -268,10 +296,11 @@ export class WeixinClient {
       throw error
     }
 
+    if (signal?.aborted) return []
     this.cursor = response.get_updates_buf || this.cursor
     // 持久化游标（写失败不致命，下次可能重放；由 _seenMessageIds 兜底去重）
     if (this.cursor) {
-      saveCursor(this.cursor).catch(() => {})
+      await saveCursor(this.cursor).catch(() => {})
     }
 
     const incoming: IncomingMessage[] = []
@@ -301,9 +330,9 @@ export class WeixinClient {
       this.rememberContext(raw)
       incoming.push(normalized)
     }
-    // 持久化已见 id（fire-and-forget，节流由文件大小控制）
+    // 交接前等待去重记录落盘。
     if (incoming.length > 0) {
-      saveSeenIds(this._seenMessageIds).catch(() => {})
+      await saveSeenIds(this._seenMessageIds).catch(() => {})
     }
     return incoming
   }
@@ -313,17 +342,17 @@ export class WeixinClient {
   async sendText(userId: string, text: string): Promise<void> {
     // Validate emptiness without stripping code indentation, trailing spaces or newlines.
     if (!text.trim()) throw new Error('Message text cannot be empty')
-    await this.sendWithFallback(userId, contextToken => apiSendMessage(this.baseUrl, this.token, userId, text, contextToken))
+    await this.trackSend(() => this.sendWithFallback(userId, contextToken => apiSendMessage(this.baseUrl, this.token, userId, text, contextToken)))
   }
 
   /** 发送文件 — 委托给 sendMedia */
   async sendFile(userId: string, filePath: string, fileName?: string): Promise<void> {
-    await this.sendMedia(userId, filePath, 3, fileName)
+    await this.trackSend(() => this.sendMedia(userId, filePath, 3, fileName))
   }
 
   /** 发送图片 — 委托给 sendMedia */
   async sendImage(userId: string, filePath: string): Promise<void> {
-    await this.sendMedia(userId, filePath, 1)
+    await this.trackSend(() => this.sendMedia(userId, filePath, 1))
   }
 
   /**

@@ -1,20 +1,35 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
-const files = vi.hoisted(() => ({ readFile: vi.fn(), writeFile: vi.fn(), mkdir: vi.fn(), chmod: vi.fn(), unlink: vi.fn() }))
+const files = vi.hoisted(() => ({ readFile: vi.fn(), writeFile: vi.fn(), mkdir: vi.fn(), chmod: vi.fn(), unlink: vi.fn(), open: vi.fn() }))
 vi.mock('node:fs/promises', () => files)
 import { inspectBridgeLock, describeBridgeLock } from '../src/bridge-lock.js'
-import { acquireLock } from '../src/auth.js'
+import { acquireLock, saveContextTokensThrottled, flushContextTokens } from '../src/auth.js'
 
 describe('bridge lock diagnostics', () => {
   const owner = { pid: 123456, sessionId: 'other-session' }
   beforeEach(() => {
     vi.clearAllMocks()
     files.readFile.mockResolvedValue(JSON.stringify(owner))
+    files.open.mockResolvedValue({ close: vi.fn() })
     files.writeFile.mockResolvedValue(undefined)
     files.mkdir.mockResolvedValue(undefined)
     files.chmod.mockResolvedValue(undefined)
     vi.spyOn(process, 'kill').mockReturnValue(true)
   })
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
+  it('waits for a timer write before flushing handoff state', async () => {
+    vi.useFakeTimers()
+    let finish!: () => void
+    files.writeFile.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+    saveContextTokensThrottled({ lastUserId: 'user', tokens: { user: 'old' } })
+    await vi.advanceTimersByTimeAsync(5_000)
+    const flushed = flushContextTokens({ lastUserId: 'user', tokens: { user: 'new' } })
+    await Promise.resolve()
+    expect(files.writeFile).toHaveBeenCalledTimes(1)
+    finish()
+    await flushed
+    expect(files.writeFile).toHaveBeenCalledTimes(2)
+    expect(files.writeFile.mock.calls[1][1]).toContain('new')
+  })
   it('reports a live other owner without claiming that polling is healthy', async () => {
     const state = await inspectBridgeLock('mock-lock')
     expect(state).toEqual({ kind: 'other', ...owner })
@@ -59,6 +74,6 @@ describe('bridge lock diagnostics', () => {
     expect(process.kill).not.toHaveBeenCalled()
     expect((await acquireLock('mine')).success).toBe(true)
     expect((await acquireLock('different')).success).toBe(false)
-    expect(files.writeFile).toHaveBeenCalledTimes(1)
+    expect(files.writeFile).not.toHaveBeenCalled()
   })
 })

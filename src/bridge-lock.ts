@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 export type BridgeLockState =
   | { kind: 'missing' }
   | { kind: 'unknown'; reason: string; pid?: number }
-  | { kind: 'current' | 'other' | 'stale'; pid: number; sessionId: string }
+  | { kind: 'current' | 'other' | 'stale'; pid: number; sessionId: string; protocol?: number }
 
 /** Read-only diagnostic. A live PID is evidence of lock ownership, not bridge health. */
 export async function inspectBridgeLock(file: string): Promise<BridgeLockState> {
@@ -13,12 +13,12 @@ export async function inspectBridgeLock(file: string): Promise<BridgeLockState> 
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
       ? { kind: 'missing' } : { kind: 'unknown', reason: '锁文件不可读或格式无效' }
   }
-  const lock = value as { pid?: unknown; sessionId?: unknown } | null
+  const lock = value as { pid?: unknown; sessionId?: unknown; protocol?: unknown } | null
   if (!lock || typeof lock.pid !== 'number' || !Number.isSafeInteger(lock.pid) || lock.pid <= 0
     || typeof lock.sessionId !== 'string' || !lock.sessionId.trim()) {
     return { kind: 'unknown', reason: '锁文件内容无效' }
   }
-  const owner = { pid: lock.pid, sessionId: lock.sessionId }
+  const owner = { pid: lock.pid, sessionId: lock.sessionId, ...(lock.protocol === 1 ? { protocol: 1 } : {}) }
   if (lock.pid === process.pid) return { kind: 'current', ...owner }
   try { process.kill(lock.pid, 0); return { kind: 'other', ...owner } }
   catch (error) {

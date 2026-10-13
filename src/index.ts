@@ -2,6 +2,7 @@
 // pi-wechat-assistant — 微信作为 pi TUI 的移动端分身
 // ============================================================================
 
+import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import * as path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -9,13 +10,13 @@ import { Type } from '@sinclair/typebox'
 // Type-only legacy import also works in hosts that only provide @earendil-works.
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
 import { SessionExpiredError, WeixinClient } from './client.js'
-import { acquireLock, releaseLock, stealLock, loadCredentials, loadConfig, getConfigCache, getBridgeLockState } from './auth.js'
+import { acquireLock, releaseLock, requestHandoff, hasHandoffRequest, loadCredentials, loadConfig, getConfigCache, getBridgeLockState } from './auth.js'
 import { describeBridgeLock } from './bridge-lock.js'
 import { debugLog } from './logger.js'
 import { splitAndFilterMarkdown } from './message.js'
 import { MessageQueue } from './queue.js'
 import { handleRemoteCommand, type RemoteCommandDeps } from './remote-commands.js'
-import { registerCommands, type CommandDeps } from './commands.js'
+import { registerCommands, startBridge, cancelBridgeStart, type CommandDeps } from './commands.js'
 import { ok, fail, formatError, isAbortError, extractTextFromMessageContent } from './utils.js'
 import { isAuthorizedWeChatSender } from './security.js'
 import {
@@ -131,6 +132,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   let agentIdle = true
   let agentPreparing = false
   let pollAbort: AbortController | null = null
+  let pollTask: Promise<void> | null = null
+  let stopping: Promise<void> | null = null
   let latestCtx: Ctx | null = null
   let wechatFilesDir: string | null = null
 
@@ -180,18 +183,20 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // --- 锁 ---
 
   function getLockId(): string {
-    if (!lockSessionId) lockSessionId = `pi-wechat-${process.pid}-${Date.now().toString(36)}`
+    if (!lockSessionId) lockSessionId = `pi-wechat-${process.pid}-${randomUUID()}`
     return lockSessionId
   }
 
   async function lock(): Promise<{ success: boolean; message: string }> {
-    const result = await acquireLock(getLockId())
-    if (result.success) lockSessionId = getLockId()
+    const id = getLockId()
+    const result = await acquireLock(id)
+    if (result.success) lockSessionId = id
     return result
   }
 
   async function unlock(): Promise<void> {
     if (lockSessionId) await releaseLock(lockSessionId)
+    lockSessionId = null
   }
 
   async function loadClient(): Promise<WeixinClient | null> {
@@ -231,60 +236,89 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (bridgeWatch) { clearInterval(bridgeWatch); bridgeWatch = null }
   }
 
-  /** 活跃桥接周期性检查锁归属；被其他会话接管时协同退出，绝不双端轮询。 */
+  let checkingOwnership = false
   async function checkBridgeOwnership(): Promise<void> {
-    if (!running) return
-    const state = await getBridgeLockState()
-    if (state.kind !== 'other') return
-    notify(`微信桥接已被其他会话接管（PID ${state.pid}），本会话已自动停止`, 'warning')
-    await stopBridge()
+    if (!running || checkingOwnership || !lockSessionId) return
+    checkingOwnership = true
+    const id = lockSessionId
+    try {
+      const requested = await hasHandoffRequest(id)
+      if (!running || lockSessionId !== id) return
+      if (requested) {
+        notify('收到微信桥接交接请求，正在停止本会话桥接并释放锁…', 'warning')
+        await stopBridge({ releaseLock: true })
+        return
+      }
+      const state = await getBridgeLockState()
+      if (!running || lockSessionId !== id) return
+      if (state.kind === 'current' && state.sessionId === id) return
+      notify('微信桥接锁归属已变化或无法确认，本会话正在停止，请检查 /wechat status。', 'warning')
+      await stopBridge({ releaseLock: true })
+    } catch (error) {
+      log(`桥接交接检查失败: ${formatError(error)}`)
+    } finally { checkingOwnership = false }
   }
 
   function startBridgeWatch(): void {
     stopBridgeWatch()
-    bridgeWatch = setInterval(() => { void checkBridgeOwnership() }, 5_000)
+    bridgeWatch = setInterval(() => { void checkBridgeOwnership() }, 1_000)
     bridgeWatch.unref?.()
   }
 
   // --- 停止 ---
 
-  async function stopBridge(options: { releaseLock?: boolean } = {}): Promise<void> {
+  function stopBridge(options: { releaseLock?: boolean } = {}): Promise<void> {
+    cancelBridgeStart(commandDeps)
+    if (stopping) return stopping
+    const task = stopBridgeInner(options)
+    stopping = task
+    void task.finally(() => { if (stopping === task) stopping = null }).catch(() => {})
+    return task
+  }
+
+  async function stopBridgeInner(options: { releaseLock?: boolean }): Promise<void> {
     const wasRunning = running
     running = false
     stopBridgeWatch()
     modelFailure.reset()
     wechatPrompt.clear()
     if (toolsRegistered) {
-      // Modern hosts also remove hidden tools from nested/codemode discovery.
       registerWechatTools(false)
       const active = pi.getActiveTools()
       const remaining = active.filter(name => !WECHAT_TOOL_NAMES.includes(name))
       if (remaining.length !== active.length) pi.setActiveTools(remaining)
     }
     pollAbort?.abort()
+    const sendsFinished = client?.pauseSending()
+    const typingUser = queue.activeRequest?.userId
+    queue.reset()
+    turn.reset()
+    updateStatusBar()
+    // Keep the lock until the old receiver and its persistent writes have settled.
+    await pollTask?.catch(error => log(`轮询退出: ${formatError(error)}`))
     pollAbort = null
-
+    await sendsFinished
     if (wasRunning && client) {
+      await client.flushReceiveState()
       await client.notifyStop().catch(error => {
         log(`notifyStop 失败（不阻断停止）: ${formatError(error)}`)
         notify(`微信下线状态同步失败，本地桥接已停止：${formatError(error)}。详情见 /wechat status。`, 'warning')
       })
     }
-
-    if (queue.activeRequest && client) {
-      await client.stopTyping(queue.activeRequest.userId).catch(() => {})
-    }
-
-    queue.reset()
-    turn.reset()
+    if (typingUser && client) await client.stopTyping(typingUser).catch(() => {})
     if (options.releaseLock) await unlock()
     updateStatusBar()
   }
 
   // --- 桥接能力：只在启动时注册并激活；回复规则固定加入系统提示词 ---
 
-  async function prepareBridge(): Promise<void> {
+  async function preflightBridge(): Promise<void> {
+    await stopping
     if (getConfigCache().messageSourceTag?.enabled !== false) await wechatPrompt.load()
+  }
+
+  async function prepareBridge(): Promise<void> {
+    client?.resumeSending()
     registerWechatTools(true)
     const active = pi.getActiveTools()
     const missing = WECHAT_TOOL_NAMES.filter(name => !active.includes(name))
@@ -293,29 +327,39 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   // --- 轮询 ---
 
-  async function pollMessages(activeClient: WeixinClient): Promise<void> {
+  function pollMessages(activeClient: WeixinClient): Promise<void> {
+    const task = runPoll(activeClient, pollAbort!.signal)
+    pollTask = task
     startBridgeWatch()
+    void task.finally(() => {
+      if (pollTask === task) pollTask = null
+      if (running) void stopBridge({ releaseLock: true }).catch(error => log(formatError(error)))
+    }).catch(() => {})
+    return task
+  }
+
+  async function runPoll(activeClient: WeixinClient, signal: AbortSignal): Promise<void> {
     await activeClient.notifyStart().catch(error => {
       log(`notifyStart 失败（不阻断启动）: ${formatError(error)}`)
       notify(`微信上线状态同步失败，本地桥接继续运行：${formatError(error)}。详情见 /wechat status。`, 'warning')
     })
     let retryDelay = POLL_RETRY_BASE_MS
-    while (running && client === activeClient) {
+    while (running && !signal.aborted && client === activeClient) {
       try {
-        const messages = await activeClient.getUpdates(pollAbort?.signal)
+        const messages = await activeClient.getUpdates(signal)
         retryDelay = POLL_RETRY_BASE_MS
         for (const message of messages) {
+          if (!running || signal.aborted) break
           await handleIncomingMessage(message, activeClient)
         }
       } catch (error) {
         if (isAbortError(error)) break
         if (error instanceof SessionExpiredError) {
           notify('微信凭证失效，请手动执行 /wechat login --force 重新登录', 'error')
-          await stopBridge({ releaseLock: true })
           break
         }
         log(`轮询失败: ${formatError(error)}`)
-        await delay(retryDelay)
+        try { await delay(retryDelay, undefined, { signal }) } catch { break }
         retryDelay = Math.min(retryDelay * 2, POLL_RETRY_MAX_MS)
       }
     }
@@ -364,18 +408,17 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   const commandDeps: CommandDeps = {
     pi,
     prepareBridge,
+    preflightBridge,
     wechatPrompt,
     getClient: () => client,
     setClient,
     loadClient,
     isRunning: () => running,
     setRunning: (v) => { running = v; if (v) agentIdle = true },
-    stealLock: async () => { await stealLock(getLockId()) },
-    getPollAbort: () => pollAbort,
+    requestHandoff,
     setPollAbort: (c) => { pollAbort = c },
     queue,
     lock,
-    unlock,
     stopBridge,
     pollMessages,
     latestCtx: () => latestCtx,
@@ -474,30 +517,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     updateStatusBar()
 
     const config = await loadConfig()
-    if (config.autoStart && client) {
-      const lockResult = await lock()
-      if (lockResult.success) {
-        try {
-          await prepareBridge()
-        } catch (error) {
-          await unlock()
-          notify('微信桥接启动失败: ' + formatError(error), 'error')
-          return
-        }
-        running = true
-        agentIdle = true
-        pollAbort = new AbortController()
-        notify('微信桥接已自动启动 📱', 'info')
-        updateStatusBar()
-        void pollMessages(client).finally(() => {
-          if (pollAbort?.signal.aborted) pollAbort = null
-        }).catch(err => {
-          log(`pollMessages 异常退出: ${formatError(err)}`)
-        })
-      } else {
-        log(`自动启动失败: ${lockResult.message}`)
-      }
-    }
+    if (config.autoStart && client) await startBridge('', ctx, commandDeps, false)
   })
 
   // Transient model context only: never persist stale stop notices in the session.
@@ -572,8 +592,12 @@ export default function wechatAssistant(pi: ExtensionAPI) {
         ? text + (imageCount ? `\n[附带 ${imageCount} 张图片]` : '')
         : imageCount ? `发送了 ${imageCount} 张图片` : null
       if (preview) {
+        const signal = pollAbort?.signal
         try {
-          for (const chunk of splitAndFilterMarkdown(`[电脑端] ${preview}`)) await client.sendText(client.userId, chunk)
+          for (const chunk of splitAndFilterMarkdown(`[电脑端] ${preview}`)) {
+            if (!running || signal?.aborted) break
+            await client.sendText(client.userId, chunk)
+          }
         } catch (error) { log(`TUI 输入同步失败: ${formatError(error)}`) }
       }
     }
@@ -658,9 +682,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
     log(`[MSG-END] incremental send to ${targetUserId}, textLen=${text.length} preview=${text.slice(0, 60)} sentCount=${turn.sentCount}`)
 
+    const sendSignal = pollAbort?.signal
     try {
       const chunks = splitAndFilterMarkdown(text)
       for (let i = 0; i < chunks.length; i++) {
+        if (!running || sendSignal?.aborted) break
         log(`[MSG-END-CHUNK] ${i + 1}/${chunks.length} len=${chunks[i].length}`)
         await client.sendText(targetUserId, chunks[i])
       }
@@ -730,13 +756,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // --- 进程退出清理 ---
 
   const exitHandler = () => {
-    if (client) {
-      // 同步 fire-and-forget（进程退出时无法 await），至少清除锁
-      client.dispose().catch(() => {})
-    }
-    if (lockSessionId) {
-      releaseLock(lockSessionId).catch(() => {})
-    }
+    // Never release ownership while this process is still polling or sending.
+    void stopBridge({ releaseLock: true }).then(disposeClient).catch(error => log(formatError(error)))
   }
 
   process.once('SIGINT', exitHandler)

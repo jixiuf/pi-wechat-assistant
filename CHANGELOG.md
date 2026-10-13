@@ -5,13 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.3] - 2026-10-14
+## [Unreleased]
 
 ### Added
-- Interactive takeover: `/wechat start` on a lock held by another live pi session opens a TUI dialog to kick it; the old session detects the ownership change within seconds, warns, and stops itself. A watchdog also guards running bridges against out-of-band takeover.
-  交互式接管：`/wechat start` 遇到其他活跃 pi 会话持锁时弹窗询问是否踢掉；旧会话数秒内检测到锁易主、警告并自动停止。看门狗同时守护运行中的桥接免受绕过接管的影响。
-- `/wechat login` auto-starts the bridge in the current session after a successful login.
-  `/wechat login` 登录成功后在当前会话自动启动桥接。
+- Cooperative bridge handoff: after local startup checks, `/wechat start` can ask a protocol-capable owner to stop, wait for its poller, in-flight sends, and state writes to finish, and acquire the released lock exclusively. Legacy owners require manual `/wechat stop`; timeout, cancellation, or changed ownership never forces takeover.
+  协作交接桥接：`/wechat start` 先完成本地启动检查，再请求支持交接协议的旧会话停止，等待其轮询、进行中的发送和状态写入结束后排他获取锁；旧版需手动 `/wechat stop`，超时、取消或归属变化时不会强行接管。
+- `/wechat login` automatically attempts to start the bridge after successful login; startup failures are reported separately from login success.
+  `/wechat login` 登录成功后自动尝试启动桥接，启动失败与登录成功分别报告。
+
+### Fixed
+- Serialize lock creation, stale-lock cleanup, and release. Give each bridge start a unique instance ID and reload receive state after acquiring ownership. Stop accepting messages before draining the previous poller; do not cancel the local AI task.
+  串行处理锁创建、失效锁清理和释放；每次启动分配唯一实例 ID，获取锁后重新读取接收状态；停止接收后等待旧轮询退出，不取消本机 AI 任务。
+- Move unreleased handoff and login changes out of the already-published 0.4.3 notes.
+  将尚未发布的交接及登录改动移出已发布的 0.4.3 说明。
+
+## [0.4.3] - 2026-10-14
 
 ### Fixed
 - Share bridge-lock diagnostics across start, status, and sending guards (PR #13). Report other-process ownership without claiming polling health; keep unreadable locks and permission failures distinct from exited processes. Correct the stop command to `/wechat stop`.

@@ -3,9 +3,8 @@
 // ============================================================================
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
-import { debugLog, isDebugEnabled } from './logger.js'
+import { debugLog } from './logger.js'
 import {
-  acquireLock,
   clearCredentials,
   clearContextTokens,
   clearTransportState,
@@ -13,14 +12,12 @@ import {
   getBridgeLockState,
   getQrCode,
   loadConfig,
-  loadCredentials,
   pollQrStatus,
-  releaseLock,
   saveConfig,
   saveCredentials,
-  stealLock,
+  requestHandoff,
 } from './auth.js'
-import { WeixinClient, SessionExpiredError, type ApiCallResult } from './client.js'
+import { WeixinClient, type ApiCallResult } from './client.js'
 import { MessageQueue, getImageBatchWaitMs, getImageMaxBytes } from './queue.js'
 import { renderQrCode, formatError } from './utils.js'
 import { QR_POLL_INTERVAL_MS, QR_MAX_REFRESH } from './constants.js'
@@ -33,18 +30,17 @@ type Ctx = ExtensionContext | ExtensionCommandContext
 export interface CommandDeps {
   pi: ExtensionAPI
   prepareBridge: () => Promise<void>
+  preflightBridge: () => Promise<void>
   wechatPrompt: WechatPrompt
   getClient: () => WeixinClient | null
   setClient: (c: WeixinClient | null) => void
   loadClient: () => Promise<WeixinClient | null>
   isRunning: () => boolean
   setRunning: (v: boolean) => void
-  stealLock: () => Promise<void>
-  getPollAbort: () => AbortController | null
+  requestHandoff: typeof requestHandoff
   setPollAbort: (c: AbortController | null) => void
   queue: MessageQueue
   lock: () => Promise<{ success: boolean; message: string }>
-  unlock: () => Promise<void>
   stopBridge: (options?: { releaseLock?: boolean }) => Promise<void>
   pollMessages: (client: WeixinClient) => Promise<void>
   latestCtx: () => Ctx | null
@@ -61,7 +57,7 @@ async function cmdLogin(args: string, ctx: Ctx, deps: CommandDeps): Promise<void
     const cached = await deps.loadClient()
     if (cached) {
       deps.notify(`已加载本地微信凭证: ${getCredentialsPath()}`, 'info')
-      if (!deps.isRunning()) await cmdStart('', ctx as ExtensionCommandContext, deps)
+      if (!deps.isRunning()) await startBridge('', ctx, deps)
       return
     }
   }
@@ -103,7 +99,7 @@ async function cmdLogin(args: string, ctx: Ctx, deps: CommandDeps): Promise<void
         deps.setClient(newClient)
         deps.notify('微信登录成功 ✅', 'info')
         deps.updateStatusBar()
-        if (!deps.isRunning()) await cmdStart('', ctx as ExtensionCommandContext, deps)
+        if (!deps.isRunning()) await startBridge('', ctx, deps)
         return
       }
 
@@ -128,57 +124,67 @@ async function cmdLogin(args: string, ctx: Ctx, deps: CommandDeps): Promise<void
   }
 }
 
-async function cmdStart(_args: string, ctx: ExtensionCommandContext, deps: CommandDeps): Promise<void> {
+const pendingStarts = new WeakMap<CommandDeps, AbortController>()
+
+export function cancelBridgeStart(deps: CommandDeps): void {
+  pendingStarts.get(deps)?.abort()
+}
+
+export async function startBridge(_args: string, ctx: Ctx, deps: CommandDeps, interactive = true): Promise<void> {
   deps.setLatestCtx(ctx)
   if (deps.isRunning()) { deps.notify('微信桥接已经在运行', 'info'); return }
-  const owner = await getBridgeLockState()
-  if (owner.kind === 'other' || owner.kind === 'unknown') {
-    if (owner.kind === 'other' && ctx.hasUI) {
-      const takeover = '踢掉该会话并在本会话启动（原会话将自动停止）'
-      const choice = await ctx.ui.select(`微信桥接由其他 pi 会话持有（PID ${owner.pid}）`, [takeover, '取消'])
-      if (choice !== takeover) { deps.notify('已取消，未改动其他会话的微信桥接。', 'info'); return }
-      await deps.stealLock()
-      deps.notify(`已接管微信桥接，原会话（PID ${owner.pid}）将自动停止`, 'info')
-    } else {
-      deps.notify(describeBridgeLock(owner), 'error')
-      return
-    }
-  }
-  const activeClient = await deps.loadClient()
-  if (!activeClient) { deps.notify('未找到微信凭证，请先执行 /wechat login', 'error'); return }
-  if (!ctx.isIdle()) {
-    deps.notify('等待当前任务结束后启动微信桥接…', 'info')
-    await ctx.waitForIdle()
-  }
-  const lockResult = await deps.lock()
-  if (!lockResult.success) {
-    const state = await getBridgeLockState()
-    if (state.kind === 'other' && ctx.hasUI) {
-      const takeover = '踢掉该会话并在本会话启动（原会话将自动停止）'
-      const choice = await ctx.ui.select(`微信桥接由其他 pi 会话持有（PID ${state.pid}）`, [takeover, '取消'])
-      if (choice !== takeover) { deps.notify('已取消，未改动其他会话的微信桥接。', 'info'); return }
-      await deps.stealLock()
-      deps.notify(`已接管微信桥接，原会话（PID ${state.pid}）将自动停止`, 'info')
-    } else {
-      deps.notify(lockResult.message, 'error')
-      return
-    }
-  }
+  if (pendingStarts.has(deps)) { deps.notify('微信桥接正在启动或等待交接', 'info'); return }
+  const attempt = new AbortController()
+  pendingStarts.set(deps, attempt)
+  const check = () => attempt.signal.throwIfAborted()
+  let acquired = false
   try {
+    const activeClient = await deps.loadClient()
+    if (!activeClient) { deps.notify('未找到微信凭证，请先执行 /wechat login', 'error'); return }
+    if (!ctx.isIdle()) {
+      if (!('waitForIdle' in ctx)) return
+      deps.notify('等待当前任务结束后启动微信桥接…', 'info')
+      await ctx.waitForIdle()
+    }
+    check()
+    await deps.preflightBridge()
+    check()
+    const owner = await getBridgeLockState()
+    check()
+    if (owner.kind === 'other' || owner.kind === 'current' || owner.kind === 'unknown') {
+      if (owner.kind === 'unknown' || owner.protocol !== 1 || !ctx.hasUI || !interactive) {
+        deps.notify(describeBridgeLock(owner), 'error')
+        return
+      }
+      const takeover = '请求旧会话停止，等待释放后在本会话启动'
+      const choice = await ctx.ui.select(`微信桥接由其他 pi 会话持有（PID ${owner.pid}）`, [takeover, '取消'])
+      check()
+      if (choice !== takeover) { deps.notify('已取消，未改动其他会话的微信桥接。', 'info'); return }
+      deps.notify('正在等待旧会话停止并释放桥接（最多 30 秒）…', 'info')
+      await deps.requestHandoff(owner, attempt.signal)
+      check()
+    }
+    const result = await deps.lock()
+    acquired = result.success
+    check()
+    if (!result.success) { deps.notify(result.message, 'error'); return }
+    // The previous owner may have advanced its cursor while we were waiting.
+    await activeClient.reloadReceiveState()
+    check()
     await deps.prepareBridge()
+    check()
+    deps.setRunning(true)
+    deps.setPollAbort(new AbortController())
+    deps.notify('微信桥接已启动 📱', 'info')
+    deps.updateStatusBar()
+    void deps.pollMessages(activeClient).catch(error => deps.notify(`微信轮询异常退出: ${formatError(error)}`, 'error'))
   } catch (error) {
-    await deps.unlock()
-    deps.notify('微信桥接启动失败: ' + formatError(error), 'error')
-    return
+    const cancelled = attempt.signal.aborted
+    if (acquired) await deps.stopBridge({ releaseLock: true })
+    deps.notify(cancelled ? '微信桥接启动已取消。' : '微信桥接启动失败: ' + formatError(error), cancelled ? 'info' : 'error')
+  } finally {
+    pendingStarts.delete(deps)
   }
-  deps.setRunning(true)
-  const pollAbort = new AbortController()
-  deps.setPollAbort(pollAbort)
-  deps.notify('微信桥接已启动 📱', 'info')
-  deps.updateStatusBar()
-  void deps.pollMessages(activeClient).finally(() => {
-    if (deps.getPollAbort()?.signal.aborted) deps.setPollAbort(null)
-  }).catch(error => deps.notify(`微信轮询异常退出: ${formatError(error)}`, 'error'))
 }
 
 async function cmdStop(_args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
@@ -368,7 +374,7 @@ export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
       ].join('\n')
       switch (sub) {
         case 'login': return cmdLogin(restArgs, ctx, deps)
-        case 'start': return cmdStart(restArgs, ctx, deps)
+        case 'start': return startBridge(restArgs, ctx, deps)
         case 'stop': return cmdStop(restArgs, ctx, deps)
         case 'status': return cmdStatus(restArgs, ctx, deps)
         case 'prompt': return cmdPrompt(restArgs, ctx, deps)

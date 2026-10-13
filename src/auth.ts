@@ -7,7 +7,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { DEFAULT_BASE_URL, fetchQrCode, getQrCodeStatus, type QrStatusResponse } from './api.js'
 import type { Credentials } from './types.js'
-import { inspectBridgeLock, describeBridgeLock } from './bridge-lock.js'
+import { inspectBridgeLock, type BridgeLockState } from './bridge-lock.js'
+import { acquireBridgeLock, releaseBridgeLock, requestBridgeHandoff, handoffRequested } from './bridge-ownership.js'
 
 // --- 路径 ---
 
@@ -155,50 +156,16 @@ export async function saveConfig(config: BridgeConfig): Promise<void> {
 
 // --- 简单文件锁 ---
 
-interface LockData {
-  pid: number
-  sessionId: string
-  timestamp: number
-}
-
 export function getBridgeLockState() { return inspectBridgeLock(LOCK_FILE) }
-
-async function _readLockFile(): Promise<LockData | null> {
-  return readJsonFile<LockData>(LOCK_FILE)
+export async function acquireLock(sessionId: string) {
+  await ensureStateDir()
+  return acquireBridgeLock(LOCK_FILE, sessionId)
 }
-
-async function _writeLockFile(sessionId: string): Promise<void> {
-  const data: LockData = { pid: process.pid, sessionId, timestamp: Date.now() }
-  await writeJsonFile(LOCK_FILE, data)
+export function releaseLock(sessionId: string) { return releaseBridgeLock(LOCK_FILE, sessionId) }
+export function requestHandoff(owner: Extract<BridgeLockState, { sessionId: string }>, signal?: AbortSignal) {
+  return requestBridgeHandoff(LOCK_FILE, owner, 30_000, signal)
 }
-
-export async function acquireLock(sessionId: string): Promise<{ success: boolean; message: string }> {
-  const existing = await getBridgeLockState()
-  if (existing.kind === 'unknown') return { success: false, message: describeBridgeLock(existing) }
-  if (existing.kind === 'current' || existing.kind === 'other') {
-    if (existing.kind === 'current' && existing.sessionId === sessionId) {
-      await _writeLockFile(sessionId)
-      return { success: true, message: '锁已更新' }
-    }
-    return { success: false, message: describeBridgeLock(existing) }
-  }
-
-  await _writeLockFile(sessionId)
-  return { success: true, message: '成功获取锁' }
-}
-
-/** 接管锁：仅在用户通过 TUI 明确确认后调用；原会话会检测到锁易主并自动停止。 */
-export async function stealLock(sessionId: string): Promise<void> {
-  await _writeLockFile(sessionId)
-}
-
-export async function releaseLock(sessionId: string): Promise<void> {
-  const existing = await _readLockFile()
-  if (existing?.sessionId === sessionId) {
-    await deleteFile(LOCK_FILE)
-  }
-}
-
+export function hasHandoffRequest(sessionId: string) { return handoffRequested(LOCK_FILE, sessionId) }
 // --- 二维码登录 ---
 
 export async function getQrCode(baseUrl?: string): Promise<{ url: string; token: string }> {
@@ -246,7 +213,14 @@ export interface PersistedContextTokens {
 
 /** 用于节流持久化的定时器 */
 let _contextTokensFlushTimer: ReturnType<typeof setTimeout> | null = null
+let _contextTokensWrite: Promise<void> = Promise.resolve()
 const CONTEXT_TOKENS_FLUSH_MS = 5_000
+
+function queueContextTokensWrite(data: PersistedContextTokens): Promise<void> {
+  // A timer may already be writing when handoff begins. Flush must wait behind it.
+  _contextTokensWrite = _contextTokensWrite.catch(() => {}).then(() => writeJsonFile(CONTEXT_TOKENS_FILE, data))
+  return _contextTokensWrite
+}
 
 export async function loadContextTokens(): Promise<PersistedContextTokens> {
   const data = await readJsonFile<PersistedContextTokens>(CONTEXT_TOKENS_FILE)
@@ -261,7 +235,7 @@ export function saveContextTokensThrottled(data: PersistedContextTokens): void {
   if (_contextTokensFlushTimer) clearTimeout(_contextTokensFlushTimer)
   _contextTokensFlushTimer = setTimeout(() => {
     _contextTokensFlushTimer = null
-    void writeJsonFile(CONTEXT_TOKENS_FILE, data)
+    void queueContextTokensWrite(data).catch(() => {})
   }, CONTEXT_TOKENS_FLUSH_MS)
 }
 
@@ -271,5 +245,5 @@ export async function flushContextTokens(data: PersistedContextTokens): Promise<
     clearTimeout(_contextTokensFlushTimer)
     _contextTokensFlushTimer = null
   }
-  await writeJsonFile(CONTEXT_TOKENS_FILE, data)
+  await queueContextTokensWrite(data)
 }
