@@ -230,7 +230,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(ctx.ui.notify).toHaveBeenCalledWith('微信桥接已启动 📱', 'info')
   })
 
-  it('keeps headless auto-start silent when the lock is held elsewhere', async () => {
+  it('reports headless auto-start lock conflicts without prompting', async () => {
     state.config.autoStart = true
     state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session', protocol: 1 }
     ctx.hasUI = false

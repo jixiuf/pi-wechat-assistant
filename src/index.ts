@@ -518,7 +518,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
     const config = await loadConfig()
     // TUI auto-start keeps the manual behaviour, including the takeover prompt;
-    // headless modes stay silent and keep the plain lock diagnostic.
+    // headless modes show the plain lock diagnostic without prompting.
     if (config.autoStart && client) await startBridge('', ctx, commandDeps, ctx.hasUI)
   })
 

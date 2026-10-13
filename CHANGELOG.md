@@ -5,11 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - 2026-10-14
+## [0.5.1] - 2026-10-14
 
 ### Fixed
 - TUI auto-start now offers the same takeover dialog as `/wechat start` when another session holds the bridge; headless modes keep the plain lock diagnostic.
   TUI 自动启动遇到其他会话持锁时，改为弹出与 `/wechat start` 相同的接管确认；无界面模式保持原有锁占用提示。
+
+## [0.5.0] - 2026-10-14
 
 ### Added
 - Open interactive common/advanced settings with `/wechat config`, using host dialogs compatible with both Pi package generations. Keep `/wechat config show` and parameterized commands for text-only use. Include reply-template actions without starting the bridge.

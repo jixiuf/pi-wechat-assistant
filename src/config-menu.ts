@@ -71,7 +71,7 @@ export async function showConfigMenu(ctx: ExtensionCommandContext, deps: ConfigM
     }
     const descriptions: Record<string, string> = {
       bidirectional: '双向同步：把电脑端的输入和 AI 回复转发给微信；关闭后只有微信发起的任务回复才发回微信',
-      'auto-start': '自动启动微信桥接：打开 pi 会话时尝试连接微信；不会接管其他会话已持有的桥接',
+      'auto-start': '自动启动微信桥接：打开 pi 会话时尝试连接微信；其他会话持锁且支持交接时，先弹窗确认',
       source: '微信消息标识与排版：微信消息加来源标记（默认 [微信]），引导 AI 用短段落和文字提问，并拦截已配置的本机提问工具',
       'remote-tools': '允许微信端 /tools 命令修改本机工具权限，默认关闭',
     }
