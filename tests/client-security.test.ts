@@ -6,6 +6,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   apiGetUpdates: vi.fn(),
+  sendMessage: vi.fn(),
+  notifyStart: vi.fn(),
+  notifyStop: vi.fn(),
   loadContextTokens: vi.fn(),
   saveContextTokensThrottled: vi.fn(),
   loadCursor: vi.fn(),
@@ -14,10 +17,13 @@ const mocks = vi.hoisted(() => ({
   saveSeenIds: vi.fn(),
 }))
 
-vi.mock('../src/api.js', () => ({
+vi.mock('../src/api.js', async () => ({
+  ...await vi.importActual<typeof import('../src/api.js')>('../src/api.js'),
   getUpdates: mocks.apiGetUpdates,
   getConfig: vi.fn(),
-  sendMessage: vi.fn(),
+  sendMessage: mocks.sendMessage,
+  notifyStart: mocks.notifyStart,
+  notifyStop: mocks.notifyStop,
   sendTyping: vi.fn(),
   getUploadUrl: vi.fn(),
   uploadToCdn: vi.fn(),
@@ -36,6 +42,7 @@ vi.mock('../src/auth.js', () => ({
 }))
 
 import { WeixinClient } from '../src/client.js'
+import { ApiError } from '../src/api.js'
 
 const credentials = {
   token: 'token',
@@ -59,6 +66,7 @@ function rawMessage(messageId: string, fromUserId: string) {
 describe('WeixinClient sender authorization', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.sendMessage.mockReset().mockResolvedValue({ ret: 0 })
     mocks.loadContextTokens.mockResolvedValue({ lastUserId: null, tokens: {} })
     mocks.loadCursor.mockResolvedValue('')
     mocks.loadSeenIds.mockResolvedValue(new Set<string>())
@@ -112,5 +120,54 @@ describe('WeixinClient sender authorization', () => {
 
     expect(client.lastActiveUserId).toBeNull()
     expect(client.getKnownUsers()).toEqual(['bound-user'])
+  })
+
+  it('attempts sending to the bound user without requiring a first inbound message', async () => {
+    const client = await WeixinClient.create(credentials)
+    await client.sendText(credentials.userId, 'hello')
+    expect(mocks.sendMessage).toHaveBeenCalledWith(credentials.baseUrl, credentials.token, credentials.userId, 'hello', undefined)
+    expect(client.hasContextToken).toBe(false)
+    expect(client.lastSend?.success).toBe(true)
+  })
+
+  it('uses restored context and retries once without it only on ret=-2', async () => {
+    mocks.loadContextTokens.mockResolvedValue({ lastUserId: null, tokens: { 'bound-user': 'cached' } })
+    mocks.sendMessage.mockRejectedValueOnce(new ApiError('prepare failed', { status: 200, code: -2 }))
+    const client = await WeixinClient.create(credentials)
+    await client.sendText(credentials.userId, 'hello')
+    expect(mocks.sendMessage.mock.calls.map(call => call[4])).toEqual(['cached', undefined])
+    expect(client.lastSend?.success).toBe(true)
+  })
+
+  it('does not retry ambiguous network errors and records the failed attempt', async () => {
+    mocks.loadContextTokens.mockResolvedValue({ lastUserId: null, tokens: { 'bound-user': 'cached' } })
+    mocks.sendMessage.mockRejectedValueOnce(new Error('network timeout'))
+    const client = await WeixinClient.create(credentials)
+    await expect(client.sendText(credentials.userId, 'hello')).rejects.toThrow('network timeout')
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1)
+    expect(client.lastSend).toMatchObject({ success: false, error: 'network timeout' })
+  })
+
+  it('limits fallback to one retry and preserves the final rejection', async () => {
+    mocks.loadContextTokens.mockResolvedValue({ lastUserId: null, tokens: { 'bound-user': 'cached' } })
+    mocks.sendMessage.mockRejectedValue(new ApiError('prepare failed', { status: 200, code: -2 }))
+    const client = await WeixinClient.create(credentials)
+    await expect(client.sendText(credentials.userId, 'hello')).rejects.toThrow('prepare failed')
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(2)
+    expect(client.lastSend?.success).toBe(false)
+  })
+
+  it('rejects outbound delivery to an unbound user even without context', async () => {
+    const client = await WeixinClient.create(credentials)
+    await expect(client.sendText('other-user', 'hello')).rejects.toThrow('只能发送给扫码绑定用户')
+    expect(mocks.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('notifies lifecycle with the saved bot credentials', async () => {
+    const client = await WeixinClient.create(credentials)
+    await client.notifyStart()
+    await client.notifyStop()
+    expect(mocks.notifyStart).toHaveBeenCalledWith(credentials.baseUrl, credentials.token)
+    expect(mocks.notifyStop).toHaveBeenCalledWith(credentials.baseUrl, credentials.token)
   })
 })

@@ -3,6 +3,9 @@
 // ============================================================================
 
 import {
+  ApiError,
+  notifyStart as apiNotifyStart,
+  notifyStop as apiNotifyStop,
   getUpdates as apiGetUpdates,
   getConfig,
   sendMessage as apiSendMessage,
@@ -130,6 +133,8 @@ async function uploadAndBuildItem(
 // ============================================================================
 
 export class WeixinClient {
+  lastSend: { success: boolean; at: string; error?: string } | null = null
+  onStatusChange?: () => void
   private readonly token: string
   private baseUrl: string
   private cursor = ''
@@ -168,6 +173,36 @@ export class WeixinClient {
   get accountId(): string { return this.credentials.accountId }
   get userId(): string { return this.credentials.userId }
   get lastActiveUserId(): string | null { return this._lastActiveUserId }
+  get hasContextToken(): boolean { return this.contextTokens.has(this.userId) }
+
+  async notifyStart(): Promise<void> {
+    await apiNotifyStart(this.baseUrl, this.token)
+  }
+
+  async notifyStop(): Promise<void> {
+    await apiNotifyStop(this.baseUrl, this.token)
+  }
+
+  private async sendWithFallback(userId: string, send: (contextToken: string | undefined) => Promise<unknown>): Promise<void> {
+    if (!isAuthorizedWeChatSender(userId, this.userId)) throw new Error('只能发送给扫码绑定用户')
+    const contextToken = this.contextTokens.get(userId)
+    try {
+      try {
+        await send(contextToken)
+      } catch (error) {
+        // Only retry explicit backend rejection; transport failures may already have delivered.
+        if (!contextToken || !(error instanceof ApiError) || error.code !== -2) throw error
+        debugLog('sendmessage ret=-2，尝试不带 context_token 重试一次')
+        await send(undefined)
+      }
+      this.lastSend = { success: true, at: new Date().toISOString() }
+    } catch (error) {
+      this.lastSend = { success: false, at: new Date().toISOString(), error: error instanceof Error ? error.message || '发送被拒绝' : String(error) }
+      throw error
+    } finally {
+      this.onStatusChange?.()
+    }
+  }
 
   getKnownUsers(): string[] {
     return Array.from(this.contextTokens.keys())
@@ -240,11 +275,9 @@ export class WeixinClient {
   // --- 消息发送 ---
 
   async sendText(userId: string, text: string): Promise<void> {
-    const contextToken = this.contextTokens.get(userId)
-    if (!contextToken) throw new Error(`No cached context token for user ${userId}`)
     const message = text.trim()
     if (!message) throw new Error('Message text cannot be empty')
-    await apiSendMessage(this.baseUrl, this.token, userId, message, contextToken)
+    await this.sendWithFallback(userId, contextToken => apiSendMessage(this.baseUrl, this.token, userId, message, contextToken))
   }
 
   /** 发送文件 — 委托给 sendMedia */
@@ -267,8 +300,7 @@ export class WeixinClient {
     mediaType: 1 | 3,
     displayName?: string,
   ): Promise<void> {
-    const contextToken = this.contextTokens.get(userId)
-    if (!contextToken) throw new Error(`No cached context token for user ${userId}`)
+    if (!isAuthorizedWeChatSender(userId, this.userId)) throw new Error('只能发送给扫码绑定用户')
 
     const { rawSize, rawMd5, aesKey, encryptedBuffer } = await encryptFile(filePath)
     const filekey = randomBytes(16).toString('hex')
@@ -279,7 +311,7 @@ export class WeixinClient {
       mediaType, rawSize, rawMd5, encryptedBuffer, aesKey, name,
     )
 
-    await sendMediaMessage(this.baseUrl, this.token, userId, contextToken, [item])
+    await this.sendWithFallback(userId, contextToken => sendMediaMessage(this.baseUrl, this.token, userId, contextToken, [item]))
   }
 
   // --- 输入态 ---
@@ -308,6 +340,7 @@ export class WeixinClient {
       this._lastActiveUserId = this.userId
       this._contextTokensDirty = true
       this._schedulePersist()
+      this.onStatusChange?.()
     }
   }
 

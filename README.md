@@ -64,6 +64,12 @@ In the pi TUI:
 
 Then open WeChat, find the bot, and start messaging.
 
+Login credentials are shared account configuration and survive session restarts. Normally, run only `/wechat start` and `/wechat stop` in each session. `login --force` is an explicit recovery command; it is never invoked automatically. `logout` clears local credentials and context, rather than revoking the binding on the WeChat server.
+
+Two-way synchronization is enabled by default: new TUI user messages and AI replies are forwarded to the bound WeChat user. Use `/wechat config bidirectional off` to forward only replies to WeChat-triggered tasks, or `on` to restore two-way sync. Existing conversation history is not replayed.
+
+The bridge restores cached reply context and sends the official startup/shutdown notifications. It attempts delivery even without cached context; if a contextual send is rejected with `ret=-2`, it retries once without context. This fallback does not guarantee delivery when WeChat requires fresh user activity. `/wechat status` distinguishes polling state, cached context, and the most recent send API result; cached context does not prove validity, and API success is not a read receipt.
+
 ## TUI Commands
 
 All commands use `/wechat` with a subcommand:
@@ -239,6 +245,12 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 
 然后打开微信找到机器人，直接发消息即可。
 
+登录凭证属于共享的账号配置，跨会话保存。日常在会话里只需 `/wechat start`、`/wechat stop`；`login --force` 仅用于手动恢复，不会自动调用。`logout` 清除本地凭证和上下文，不等于在微信服务端解绑。
+
+双向同步默认开启：新的电脑端用户输入和 AI 回复会同步给扫码绑定用户。执行 `/wechat config bidirectional off` 后仅发送微信任务的回复；执行 `/wechat config bidirectional on` 恢复双向同步。不会重发历史会话内容。
+
+启动会恢复已保存的消息发送凭据（`context_token`），并调用官方上线通知；停止时调用下线通知。没有消息发送凭据也会尝试发送；携带该凭据发送被明确以 `ret=-2` 拒绝时，去掉该凭据重试一次。这个兜底不保证绕过微信侧需要新用户消息的限制。`/wechat status` 分别显示登录凭据、轮询状态、消息发送凭据和最近发送接口结果：发送凭据已保存不代表仍有效，接口成功不代表已读。
+
 ## TUI 命令
 
 | 命令 | 说明 |
@@ -300,7 +312,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 ~/.pi/agent/wechat-assistant/
 ├── credentials.json    # 登录凭证（权限 600）
 ├── config.json         # 自动启动、远程工具、图片限制（权限 600）
-├── context-tokens.json # 绑定用户的回复上下文（权限 600）
+├── context-tokens.json # 绑定用户的消息发送凭据（权限 600）
 ├── cursor.json         # 长轮询游标（权限 600）
 ├── seen-ids.json       # 去重用的近期消息 ID（权限 600）
 └── session.lock        # 排他锁文件（权限 600）

@@ -9,7 +9,7 @@ import { Type } from '@sinclair/typebox'
 // @ts-ignore — @earendil-works is the current package, but the older package still carries TS declarations used for compatibility here
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
 import { SessionExpiredError, WeixinClient } from './client.js'
-import { acquireLock, releaseLock, loadCredentials, loadConfig } from './auth.js'
+import { acquireLock, releaseLock, loadCredentials, loadConfig, getConfigCache } from './auth.js'
 import { debugLog, isDebugEnabled } from './logger.js'
 import { splitAndFilterMarkdown } from './message.js'
 import { MessageQueue } from './queue.js'
@@ -75,13 +75,11 @@ type ToolGuardResult = {
 function guardSendToWechat(
   client: WeixinClient | null,
   running: boolean,
-  lastWechatUser: { userId: string } | null,
   filePath: string,
   latestCtx: Ctx | null,
 ): ToolGuardResult {
   if (!client) return { allowed: false, error: fail('微信未登录，请先在 TUI 执行 /wechat login 和 /wechat start') }
   if (!running) return { allowed: false, error: fail('微信桥接未启动，请先在 TUI 执行 /wechat start') }
-  if (!lastWechatUser) return { allowed: false, error: fail('尚未收到微信用户消息，无法获取 context_token。请先让微信用户发送一条消息。') }
 
   const cwd = latestCtx?.cwd ?? process.cwd()
   const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)
@@ -153,7 +151,9 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (!client && !running) { latestCtx.ui.setStatus('wechat', ''); return }
     if (running) {
       const pending = queue.pending
-      latestCtx.ui.setStatus('wechat', `[微信 ✅ 已连接${pending > 0 ? ` | 待处理:${pending}` : ''}]`)
+      const context = client?.hasContextToken ? '发送凭据已保存' : '发送凭据未获取'
+      const send = client?.lastSend ? (client.lastSend.success ? 'API发送成功' : '发送失败') : '未尝试发送'
+      latestCtx.ui.setStatus('wechat', `[微信 ▶ 轮询中 | ${context} | ${send}${pending > 0 ? ` | 待处理:${pending}` : ''}]`)
     } else if (client) {
       latestCtx.ui.setStatus('wechat', '[微信 ⏸ 未连接]')
     } else {
@@ -182,29 +182,37 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (!client) {
       const creds = await loadCredentials()
       if (creds) {
-        client = await WeixinClient.create(creds)
-        const lastUserId = client.lastActiveUserId
-        if (lastUserId) {
-          queue.lastWechatUser = { userId: lastUserId, contextToken: '' }
-        }
+        setClient(await WeixinClient.create(creds))
       }
     }
     return client
+  }
+
+  function setClient(value: WeixinClient | null): void {
+    if (client) client.onStatusChange = undefined
+    client = value
+    if (client) client.onStatusChange = updateStatusBar
+    queue.lastWechatUser = client ? { userId: client.userId, contextToken: '' } : null
   }
 
   async function disposeClient(): Promise<void> {
     if (client) {
       await client.dispose()
     }
-    client = null
+    setClient(null)
   }
 
   // --- 停止 ---
 
   async function stopBridge(options: { releaseLock?: boolean } = {}): Promise<void> {
+    const wasRunning = running
     running = false
     pollAbort?.abort()
     pollAbort = null
+
+    if (wasRunning && client) {
+      await client.notifyStop().catch(error => log(`notifyStop 失败（不阻断停止）: ${formatError(error)}`))
+    }
 
     if (queue.activeRequest && client) {
       await client.stopTyping(queue.activeRequest.userId).catch(() => {})
@@ -231,6 +239,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // --- 轮询 ---
 
   async function pollMessages(activeClient: WeixinClient): Promise<void> {
+    await activeClient.notifyStart().catch(error => log(`notifyStart 失败（不阻断启动）: ${formatError(error)}`))
     let retryDelay = POLL_RETRY_BASE_MS
     while (running && client === activeClient) {
       try {
@@ -242,7 +251,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       } catch (error) {
         if (isAbortError(error)) break
         if (error instanceof SessionExpiredError) {
-          notify('微信 Session 已过期，请执行 /wechat-login 重新登录', 'error')
+          notify('微信凭证失效，请手动执行 /wechat login --force 重新登录', 'error')
           await stopBridge({ releaseLock: true })
           break
         }
@@ -296,7 +305,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   const commandDeps: CommandDeps = {
     pi,
     getClient: () => client,
-    setClient: (c) => { client = c },
+    setClient,
     loadClient,
     isRunning: () => running,
     setRunning: (v) => { running = v; if (v) agentIdle = true },
@@ -335,14 +344,14 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       fileName: Type.Optional(Type.String({ description: '在微信中显示的文件名（可选，默认使用原文件名）' })),
     }),
     async execute(_toolCallId, params, _signal) {
-      const guard = guardSendToWechat(client, running, queue.lastWechatUser, params.filePath, latestCtx)
+      const guard = guardSendToWechat(client, running, params.filePath, latestCtx)
       if (!guard.allowed) return guard.error
       const sizeError = guardFileSize(guard.resolvedPath)
       if (sizeError) return sizeError
 
       try {
         const stats = statSync(guard.resolvedPath)
-        await client!.sendFile(queue.lastWechatUser!.userId, guard.resolvedPath, params.fileName)
+        await client!.sendFile(client!.userId, guard.resolvedPath, params.fileName)
         const name = params.fileName ?? path.basename(guard.resolvedPath)
         return ok(`✅ 文件「${name}」(${(stats.size / 1024).toFixed(1)} KB) 已发送到微信`)
       } catch (err) {
@@ -366,14 +375,14 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       imagePath: Type.String({ description: '要发送的图片路径（项目目录内的绝对路径或相对路径，支持 png/jpg/gif/webp）' }),
     }),
     async execute(_toolCallId, params, _signal) {
-      const guard = guardSendToWechat(client, running, queue.lastWechatUser, params.imagePath, latestCtx)
+      const guard = guardSendToWechat(client, running, params.imagePath, latestCtx)
       if (!guard.allowed) return guard.error
       const sizeError = guardFileSize(guard.resolvedPath)
       if (sizeError) return sizeError
 
       try {
         const stats = statSync(guard.resolvedPath)
-        await client!.sendImage(queue.lastWechatUser!.userId, guard.resolvedPath)
+        await client!.sendImage(client!.userId, guard.resolvedPath)
         return ok(`✅ 图片 (${(stats.size / 1024).toFixed(1)} KB) 已发送到微信`)
       } catch (err) {
         log(`send_image_to_wechat 失败: ${formatError(err)}`)
@@ -412,13 +421,16 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     }
   })
 
-  // 用户在 TUI 主动输入非命令内容 → 打断微信对话活跃状态
-  pi.on('input', (event, ctx) => {
+  // TUI input can be queued: do not alter the active reply's source here.
+  pi.on('input', async (event, ctx) => {
     latestCtx = ctx
     if (event.source === 'extension') return
     const text = event.text?.trim()
     if (!text || text.startsWith('/')) return
-    turn.wechatConversationActive = false
+    if (!running || !client || getConfigCache().bidirectionalSync === false) return
+    try {
+      for (const chunk of splitAndFilterMarkdown(`[电脑端] ${text}`)) await client.sendText(client.userId, chunk)
+    } catch (error) { log(`TUI 输入同步失败: ${formatError(error)}`) }
   })
 
   // 系统提示词注入
@@ -448,17 +460,19 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       log(`[AGENT-START] turn#${turn.seq} source=WECHAT userId=${turn.targetUser} pendingInjection consumed`)
       queue.pendingInjection = null
     } else {
-      turn.targetUser = queue.lastWechatUser?.userId ?? null
+      turn.wechatConversationActive = false
+      turn.targetUser = client?.userId ?? null
       log(`[AGENT-START] turn#${turn.seq} source=TUI targetUser=${turn.targetUser ?? 'null'}`)
     }
   })
 
-  // 增量发送（仅微信触发的 turn）
+  // 增量发送；来源识别保留，双向配置决定是否同步 TUI 回合。
   pi.on('message_end', async (event, ctx) => {
     if (event.message.role !== 'assistant') return
-    if (!running || !client || !turn.wechatConversationActive) return
+    if (!running || !client) return
+    if (!turn.wechatConversationActive && getConfigCache().bidirectionalSync === false) return
 
-    const targetUserId = turn.targetUser
+    const targetUserId = turn.targetUser ?? client.userId
     if (!targetUserId) {
       log(`[MSG-END-SKIP] no target user`)
       return

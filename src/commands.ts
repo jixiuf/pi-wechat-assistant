@@ -60,6 +60,7 @@ async function cmdLogin(args: string, ctx: Ctx, deps: CommandDeps): Promise<void
 
   // 强制重新登录时清除旧身份的会话和长轮询状态。
   if (force) {
+    await deps.disposeClient()
     await Promise.all([clearContextTokens(), clearTransportState()])
   }
 
@@ -131,7 +132,7 @@ async function cmdStart(_args: string, ctx: Ctx, deps: CommandDeps): Promise<voi
   deps.updateStatusBar()
   void deps.pollMessages(activeClient).finally(() => {
     if (deps.getPollAbort()?.signal.aborted) deps.setPollAbort(null)
-  })
+  }).catch(error => deps.notify(`微信轮询异常退出: ${formatError(error)}`, 'error'))
 }
 
 async function cmdStop(_args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
@@ -147,7 +148,10 @@ async function cmdStatus(_args: string, ctx: Ctx, deps: CommandDeps): Promise<vo
   const config = await loadConfig()
   const lines = [
     `运行状态: ${deps.isRunning() ? '✅ 运行中' : '⏸ 已停止'}`,
-    `凭证状态: ${activeClient ? '✅ 已登录' : '❌ 未登录'}`,
+    `登录凭据: ${activeClient ? '已加载（有效性由接口验证）' : '未加载'}`,
+    `消息发送凭据: ${activeClient?.hasContextToken ? '已保存（不代表仍有效）' : '未获取（发送时尝试不携带此凭据）'}`,
+    `最近发送: ${!activeClient?.lastSend ? '尚未尝试' : `${activeClient.lastSend.success ? 'API 返回成功（不代表已读）' : '失败: ' + activeClient.lastSend.error} @ ${activeClient.lastSend.at}`}`,
+    `双向同步: ${config.bidirectionalSync !== false ? '开启' : '关闭（仅微信任务回复）'}`,
     `账号 ID: ${activeClient?.accountId ?? '-'}`,
     `用户 ID: ${activeClient?.userId ?? '-'}`,
     `排队消息: ${deps.queue.pending}`,
@@ -181,11 +185,19 @@ async function cmdConfig(args: string, ctx: Ctx, deps: CommandDeps): Promise<voi
   if (!key) {
     deps.notify([
       `自动启动: ${config.autoStart ? '已开启' : '已关闭'}`,
+      `双向同步: ${config.bidirectionalSync !== false ? '已开启（默认）' : '已关闭'}`,
       `微信 /tools: ${config.allowRemoteTools ? '已开启' : '已关闭（/wechat remotetools on 开启）'}`,
       `图片合并等待: ${getImageBatchWaitMs()}ms`,
       `图片上限: ${Math.round(getImageMaxBytes() / 1024 / 1024)}MB`,
-      '', '用法:', '/wechat config image-wait 8000', '/wechat config image-max 50',
+      '', '用法:', '/wechat config bidirectional on|off', '/wechat config image-wait 8000', '/wechat config image-max 50',
     ].join('\n'), 'info')
+    return
+  }
+  if (key === 'bidirectional') {
+    if (value !== 'on' && value !== 'off') { deps.notify('用法: /wechat config bidirectional on|off', 'error'); return }
+    config.bidirectionalSync = value === 'on'
+    await saveConfig(config)
+    deps.notify(`双向同步已${config.bidirectionalSync ? '开启' : '关闭'}`, 'info')
     return
   }
   const numeric = Number(value)
@@ -195,7 +207,7 @@ async function cmdConfig(args: string, ctx: Ctx, deps: CommandDeps): Promise<voi
   } else if (key === 'image-max') {
     config.imageMaxBytes = Math.round(numeric * 1024 * 1024)
   } else {
-    deps.notify('未知配置项。支持: image-wait, image-max', 'error')
+    deps.notify('未知配置项。支持: bidirectional, image-wait, image-max', 'error')
     return
   }
   await saveConfig(config)

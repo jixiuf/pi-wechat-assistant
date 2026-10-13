@@ -116,6 +116,8 @@ export async function clearContextTokens(): Promise<void> {
 
 export interface BridgeConfig {
   autoStart?: boolean
+  /** 默认同步 TUI 输入和 AI 回复到微信；关闭后仅转发微信任务回复。 */
+  bidirectionalSync?: boolean
   /** 是否允许微信端 /tools 命令修改本机工具权限（安全考虑，默认关闭） */
   allowRemoteTools?: boolean
   /** 图片批量合并等待时间；收到文字补充会立即处理 */

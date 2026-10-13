@@ -130,7 +130,7 @@ export interface SendMessageReq {
     client_id: string
     message_type: number
     message_state: number
-    context_token: string
+    context_token?: string
     item_list: MessageItem[]
   }
   base_info: BaseInfo
@@ -179,7 +179,7 @@ export interface SendMediaMessageReq {
     client_id: string
     message_type: number
     message_state: number
-    context_token: string
+    context_token?: string
     item_list: MessageItem[]
   }
   base_info: BaseInfo

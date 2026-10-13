@@ -137,7 +137,7 @@ export async function sendMessage(
   token: string,
   userId: string,
   text: string,
-  contextToken: string,
+  contextToken: string | undefined,
 ): Promise<Record<string, unknown>> {
   return apiPost<Record<string, unknown>>(
     baseUrl,
@@ -176,6 +176,14 @@ export async function getConfig(
     token,
     15_000,
   )
+}
+
+export async function notifyStart(baseUrl: string, token: string): Promise<void> {
+  await apiPost(baseUrl, '/ilink/bot/msg/notifystart', { base_info: buildBaseInfo() }, token, 10_000)
+}
+
+export async function notifyStop(baseUrl: string, token: string): Promise<void> {
+  await apiPost(baseUrl, '/ilink/bot/msg/notifystop', { base_info: buildBaseInfo() }, token, 10_000)
 }
 
 export async function sendTyping(
@@ -286,7 +294,7 @@ export async function sendMediaMessage(
   baseUrl: string,
   token: string,
   userId: string,
-  contextToken: string,
+  contextToken: string | undefined,
   itemList: SendMediaMessageReq['msg']['item_list'],
 ): Promise<Record<string, unknown>> {
   const body: SendMediaMessageReq = {
