@@ -478,8 +478,6 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     }
   })
 
-  // Hold submissions during preparation on older Pi. The rules section is appended
-  // only to runs triggered by a bridge submission; TUI runs keep a clean prompt.
   // Hold submissions during preparation on older Pi. Append the same conditional
   // rules section to every run while the bridge runs; the section itself limits
   // application to requests that start with the WeChat marker.

@@ -31,7 +31,7 @@ The rules ask for short paragraphs, numbered choices, and questions answered thr
 
 While the bridge runs with the source feature on (the default), every agent run appends one fixed `<wechat-system-rules>` section to the system prompt, regardless of whether the input came from WeChat or the TUI. The section states that the WeChat rules are conditional: they apply only when the latest user request was delivered by the bridge and starts with the source marker. User messages carry only the marker and the original input; history is never rewritten.
 
-Because the section is identical for WeChat and TUI turns, alternating input sources does not rewrite the system prompt. Toggling the source feature or reloading the template changes only future runs — both commands wait for the current task to finish — so a running reply keeps its original rules. Starting and stopping the bridge still changes the tool set (see below) and can affect prompt caching; the source switch itself does not.
+Because the section is identical for WeChat and TUI turns, alternating input sources does not rewrite the system prompt. Toggling the source feature or reloading the template changes only future runs — both commands wait for the current task to finish — so a running reply keeps its original rules. Starting and stopping the bridge still changes the tool set (see below) and can affect prompt caching. Toggling the source feature or reloading its template can also affect caching by changing the system rules; alternating input sources alone does not.
 
 ### Local question tools
 
@@ -96,7 +96,7 @@ References: [Pi 1.2.0 extension contracts](https://github.com/earendil-works/pi/
 
 桥接运行且来源功能开启（默认）时，每次任务都会在系统提示词末尾追加同一段固定的 `<wechat-system-rules>`，不区分本次输入来自微信还是电脑端。该段明确规则是条件性的：仅当最新用户请求由桥接投递并以来源标识开头时才套用。用户消息只携带来源标识和原文，历史不会被改写。
 
-由于微信/电脑端交替输入时该段完全一致，切换输入源不会重写系统提示词。切换来源开关或重载模板只影响之后的任务（两条命令都会等待当前任务结束），进行中的回复保持原规则。启动和停止桥接仍会改变工具集（见下）并可能影响提示词缓存；来源开关本身不会。
+由于微信/电脑端交替输入时该段完全一致，切换输入源不会重写系统提示词。切换来源开关或重载模板只影响之后的任务（两条命令都会等待当前任务结束），进行中的回复保持原规则。启动和停止桥接仍会改变工具集（见下）并可能影响提示词缓存。切换来源功能开关或重载模板也可能因系统规则变化而影响缓存；单纯切换输入来源不会。
 
 仅安装但不启动桥接，不注册微信发送工具。启动时注册并激活文件/图片工具，停止时移出活动工具集。因此，启动和停止会改变工具集，可能影响提示词缓存；切换来源开关或输入渠道不改变工具集。
 

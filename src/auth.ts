@@ -120,7 +120,7 @@ export interface BridgeConfig {
   bidirectionalSync?: boolean
   /** 是否允许微信端 /tools 命令修改本机工具权限（安全考虑，默认关闭） */
   allowRemoteTools?: boolean
-  /** 来源标识与微信回复约定共用此开关，默认关闭。 */
+  /** 来源标识与微信回复约定共用此开关，默认开启。 */
   messageSourceTag?: {
     enabled?: boolean
     wechatTag?: string
