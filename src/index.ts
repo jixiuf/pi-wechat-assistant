@@ -9,7 +9,7 @@ import { Type } from '@sinclair/typebox'
 // Type-only legacy import also works in hosts that only provide @earendil-works.
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
 import { SessionExpiredError, WeixinClient } from './client.js'
-import { acquireLock, releaseLock, loadCredentials, loadConfig, getConfigCache, getBridgeLockState } from './auth.js'
+import { acquireLock, releaseLock, stealLock, loadCredentials, loadConfig, getConfigCache, getBridgeLockState } from './auth.js'
 import { describeBridgeLock } from './bridge-lock.js'
 import { debugLog } from './logger.js'
 import { splitAndFilterMarkdown } from './message.js'
@@ -225,11 +225,33 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     setClient(null)
   }
 
+  let bridgeWatch: ReturnType<typeof setInterval> | null = null
+
+  function stopBridgeWatch(): void {
+    if (bridgeWatch) { clearInterval(bridgeWatch); bridgeWatch = null }
+  }
+
+  /** 活跃桥接周期性检查锁归属；被其他会话接管时协同退出，绝不双端轮询。 */
+  async function checkBridgeOwnership(): Promise<void> {
+    if (!running) return
+    const state = await getBridgeLockState()
+    if (state.kind !== 'other') return
+    notify(`微信桥接已被其他会话接管（PID ${state.pid}），本会话已自动停止`, 'warning')
+    await stopBridge()
+  }
+
+  function startBridgeWatch(): void {
+    stopBridgeWatch()
+    bridgeWatch = setInterval(() => { void checkBridgeOwnership() }, 5_000)
+    bridgeWatch.unref?.()
+  }
+
   // --- 停止 ---
 
   async function stopBridge(options: { releaseLock?: boolean } = {}): Promise<void> {
     const wasRunning = running
     running = false
+    stopBridgeWatch()
     modelFailure.reset()
     wechatPrompt.clear()
     if (toolsRegistered) {
@@ -272,6 +294,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // --- 轮询 ---
 
   async function pollMessages(activeClient: WeixinClient): Promise<void> {
+    startBridgeWatch()
     await activeClient.notifyStart().catch(error => {
       log(`notifyStart 失败（不阻断启动）: ${formatError(error)}`)
       notify(`微信上线状态同步失败，本地桥接继续运行：${formatError(error)}。详情见 /wechat status。`, 'warning')
@@ -347,6 +370,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     loadClient,
     isRunning: () => running,
     setRunning: (v) => { running = v; if (v) agentIdle = true },
+    stealLock: async () => { await stealLock(getLockId()) },
     getPollAbort: () => pollAbort,
     setPollAbort: (c) => { pollAbort = c },
     queue,

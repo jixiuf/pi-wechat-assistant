@@ -4,7 +4,9 @@ import type { BridgeConfig } from '../src/auth.js'
 const state = vi.hoisted(() => ({
   config: {} as BridgeConfig,
   queue: null as any,
+  lockConflict: false,
   lockState: { kind: 'missing' } as any,
+  stealLock: vi.fn(async () => {}),
   client: {
     userId: 'bound-user', accountId: 'bot', lastActiveUserId: null,
     hasContextToken: false,
@@ -25,7 +27,10 @@ vi.mock('../src/auth.js', async () => ({
   loadConfig: vi.fn(async () => state.config),
   saveConfig: vi.fn(async (config: BridgeConfig) => { state.config = config }),
   getConfigCache: vi.fn(() => state.config),
-  acquireLock: vi.fn(async () => ({ success: true })),
+  acquireLock: vi.fn(async () => state.lockConflict
+    ? { success: false, message: '其他 pi 进程持有微信桥接锁（PID 424242）' }
+    : { success: true }),
+  stealLock: state.stealLock,
   releaseLock: vi.fn(),
   getBridgeLockState: vi.fn(async () => state.lockState),
 }))
@@ -50,6 +55,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     vi.clearAllMocks()
     vi.stubEnv('NO_COLOR', '1')
     state.config = {}
+    state.lockConflict = false
     state.lockState = { kind: 'missing' }
     state.client.hasContextToken = false
     state.client.lastSend = null
@@ -66,7 +72,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
       cwd: process.cwd(), hasUI: true, isIdle: vi.fn(() => true), waitForIdle: vi.fn(),
       model: { provider: 'test', id: 'test-model' },
       modelRegistry: { hasConfiguredAuth: vi.fn(() => true), getApiKeyAndHeaders: vi.fn() },
-      ui: { notify: vi.fn(), setStatus: vi.fn() },
+      ui: { notify: vi.fn(), setStatus: vi.fn(), select: vi.fn() },
     }
     oldListeners = new Map(['SIGINT', 'SIGTERM', 'beforeExit'].map(name => [name, process.listeners(name)]))
     installExtension()
@@ -94,6 +100,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     }
     vi.restoreAllMocks()
     vi.unstubAllEnvs()
+    vi.useRealTimers()
   })
 
   const command = (args: string) => commands.wechat.handler(args, ctx)
@@ -500,8 +507,14 @@ describe('bridge bidirectional sync and lifecycle', () => {
     { kind: 'unknown', reason: '锁文件不可读' },
   ])('keeps tools unregistered when start cannot establish ownership: $kind', async owner => {
     state.lockState = owner
+    if (owner.kind === 'other') ctx.ui.select.mockResolvedValueOnce('取消')
     await command('start')
-    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining(owner.kind === 'other' ? 'PID 123456' : '无法确认'), 'error')
+    if (owner.kind === 'other') {
+      expect(ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining('PID 123456'), expect.anything())
+      expect(ctx.ui.notify).toHaveBeenLastCalledWith('已取消，未改动其他会话的微信桥接。', 'info')
+    } else {
+      expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining('无法确认'), 'error')
+    }
     expect(registeredTools.size).toBe(0)
     expect(activeTools).toEqual(['read', 'bash'])
     expect(await handlers.before_agent_start({ systemPrompt: 'base', prompt: 'local' }, ctx)).toBeUndefined()
@@ -572,6 +585,84 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ▶ | 待处理:2 | 发送失败]`)
     await command('stop')
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⏸]`)
+  })
+
+  it('offers a takeover dialog on a live lock, respecting cancellation', async () => {
+    state.lockConflict = true
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session' }
+    ctx.ui.select.mockResolvedValueOnce('取消')
+    await command('start')
+    expect(ctx.ui.select).toHaveBeenCalledWith(
+      expect.stringContaining('PID 424242'),
+      [expect.stringContaining('踢掉该会话'), '取消'],
+    )
+    expect(ctx.ui.notify).toHaveBeenCalledWith('已取消，未改动其他会话的微信桥接。', 'info')
+    expect(state.stealLock).not.toHaveBeenCalled()
+    expect(activeTools).toEqual(['read', 'bash'])
+  })
+
+  it('takes over the lock after explicit confirmation and starts locally', async () => {
+    state.lockConflict = true
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session' }
+    // 真实 stealLock 会把磁盘锁改写为本会话；mock 同步这两个效果。
+    state.stealLock.mockImplementation(async () => {
+      state.lockConflict = false
+      state.lockState = { kind: 'current', pid: process.pid, sessionId: 'mine' }
+    })
+    ctx.ui.select.mockResolvedValueOnce('踢掉该会话并在本会话启动（原会话将自动停止）')
+    await command('start')
+    expect(state.stealLock).toHaveBeenCalledTimes(1)
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('已接管微信桥接'), 'info')
+    expect(activeTools).toEqual(['read', 'bash', 'send_file_to_wechat', 'send_image_to_wechat'])
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', '[微信 ⇄ ▶]')
+  })
+
+  it('reports a plain error for a live lock without UI', async () => {
+    state.lockConflict = true
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session' }
+    ctx.hasUI = false
+    const printed: string[] = []
+    const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { printed.push(args.join(' ')) })
+    const err = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { printed.push(args.join(' ')) })
+    try {
+      await command('start')
+    } finally {
+      log.mockRestore()
+      err.mockRestore()
+    }
+    expect(ctx.ui.select).not.toHaveBeenCalled()
+    expect(printed.join('')).toContain('424242')
+    expect(state.stealLock).not.toHaveBeenCalled()
+  })
+
+  it('auto-stops and warns when another session takes over the lock', async () => {
+    vi.useFakeTimers()
+    try {
+      await command('start')
+      expect(activeTools).toHaveLength(4)
+      state.lockState = { kind: 'other', pid: 424242, sessionId: 'new-owner' }
+      await vi.advanceTimersByTimeAsync(5_100)
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('已被其他会话接管'), 'warning')
+      expect(activeTools).toEqual(['read', 'bash'])
+      expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', '[微信 ⏸]')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('starts the bridge automatically after login with cached credentials', async () => {
+    await command('login')
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('已加载本地微信凭证'), 'info')
+    expect(activeTools).toEqual(['read', 'bash', 'send_file_to_wechat', 'send_image_to_wechat'])
+    expect(ctx.ui.notify).toHaveBeenCalledWith('微信桥接已启动 📱', 'info')
+  })
+
+  it('does not double-start when the bridge already runs during login', async () => {
+    await command('start')
+    ctx.ui.notify.mockClear()
+    await command('login')
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('已加载本地微信凭证'), 'info')
+    expect(ctx.ui.notify).not.toHaveBeenCalledWith('微信桥接已启动 📱', 'info')
   })
 
   it('shows the default template while the bridge runs with source rules on by default', async () => {

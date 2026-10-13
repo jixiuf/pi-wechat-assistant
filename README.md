@@ -68,7 +68,7 @@ Login credentials are shared account configuration and survive session restarts.
 
 Two-way synchronization is enabled by default: new TUI user messages and AI replies are forwarded to the bound WeChat user. Use `/wechat config bidirectional off` to forward only replies to WeChat-triggered tasks, or `on` to restore two-way sync. Existing conversation history is not replayed.
 
-The bridge restores cached reply context and sends the official startup/shutdown notifications. It attempts delivery even without cached context; if a contextual send is rejected with `ret=-2`, it retries once without context. This fallback does not guarantee delivery when WeChat requires fresh user activity: a persistent `ret=-2` rejection raises a one-time warning suggesting to send a message from WeChat first, `/wechat status` explains the remedy, and the footer keeps showing `发送失败` until a send succeeds. `/wechat status` distinguishes polling state, cached context, and the most recent send API result; cached context does not prove validity, and API success is not a read receipt.
+`/wechat login` auto-starts the bridge in the current session after a successful login. When `/wechat start` finds the lock held by another live pi session, a TUI dialog offers to kick it: the old session is warned, stops itself within seconds, and never double-polls. The bridge restores cached reply context and sends the official startup/shutdown notifications. It attempts delivery even without cached context; if a contextual send is rejected with `ret=-2`, it retries once without context. This fallback does not guarantee delivery when WeChat requires fresh user activity: a persistent `ret=-2` rejection raises a one-time warning suggesting to send a message from WeChat first, `/wechat status` explains the remedy, and the footer keeps showing `发送失败` until a send succeeds. `/wechat status` distinguishes polling state, cached context, and the most recent send API result; cached context does not prove validity, and API success is not a read receipt.
 
 The compact footer wraps standard Unicode glyphs in brackets — a green `微信` label, `⇄` while two-way sync is enabled, and green `▶` / red `⏸` for running / stopped — so every terminal renders them at a consistent size without Nerd Fonts. The `微信` label uses WeChat green (`#07C160`) on truecolor terminals and white otherwise; running / stopped indicators use green / red (standard ANSI colors on non-truecolor terminals); `NO_COLOR` disables all styling. Queue counts and send failures appear only when relevant; credentials and successful-send diagnostics remain in `/wechat status`.
 
@@ -78,7 +78,7 @@ All commands use `/wechat` with a subcommand:
 
 | Command | Description |
 | --- | --- |
-| `/wechat login` | Scan QR code to log in |
+| `/wechat login` | Scan QR code to log in (auto-starts the bridge) |
 | `/wechat login --force` | Force re-scan |
 | `/wechat start` | Start the WeChat connection |
 | `/wechat stop` | Stop and release the lock |
@@ -259,7 +259,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 
 双向同步默认开启：新的电脑端用户输入和 AI 回复会同步给扫码绑定用户。执行 `/wechat config bidirectional off` 后仅发送微信任务的回复；执行 `/wechat config bidirectional on` 恢复双向同步。不会重发历史会话内容。
 
-启动会恢复已保存的消息发送凭据（`context_token`），并调用官方上线通知；停止时调用下线通知。没有消息发送凭据也会尝试发送；携带该凭据发送被明确以 `ret=-2` 拒绝时，去掉该凭据重试一次。这个兜底不保证绕过微信侧需要新用户消息的限制：持续被 `ret=-2` 拒绝时会弹一次性警告，提示先从微信发送一条消息，`/wechat status` 也会说明补救方法，底部保持 `发送失败` 直到发送成功。`/wechat status` 分别显示登录凭据、轮询状态、消息发送凭据和最近发送接口结果：发送凭据已保存不代表仍有效，接口成功不代表已读。
+`/wechat login` 登录成功后在当前会话自动启动桥接。`/wechat start` 遇到锁被其他活跃 pi 会话持有时会弹窗询问是否踢掉：旧会话收到警告并在数秒内自动停止，不会出现双端轮询。启动会恢复已保存的消息发送凭据（`context_token`），并调用官方上线通知；停止时调用下线通知。没有消息发送凭据也会尝试发送；携带该凭据发送被明确以 `ret=-2` 拒绝时，去掉该凭据重试一次。这个兜底不保证绕过微信侧需要新用户消息的限制：持续被 `ret=-2` 拒绝时会弹一次性警告，提示先从微信发送一条消息，`/wechat status` 也会说明补救方法，底部保持 `发送失败` 直到发送成功。`/wechat status` 分别显示登录凭据、轮询状态、消息发送凭据和最近发送接口结果：发送凭据已保存不代表仍有效，接口成功不代表已读。
 
 底部以方括号包裹标准 Unicode 字形——绿色 `微信` 标签、`⇄`（仅双向同步开启时显示）及绿色 `▶` / 红色 `⏸`（运行 / 停止）——不依赖 Nerd Font，任何终端下尺寸一致。`微信` 标签在真彩色终端使用微信绿（`#07C160`），否则降级为白色；运行 / 停止图标分别为绿色 / 红色（非真彩色终端使用标准 ANSI 颜色）。设置 `NO_COLOR` 可关闭所有着色。只在有排队消息或发送失败时追加提示；凭据与成功发送详情留在 `/wechat status`。
 
@@ -267,7 +267,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 
 | 命令 | 说明 |
 | --- | --- |
-| `/wechat login` | 扫码登录 |
+| `/wechat login` | 扫码登录（成功后自动启动桥接） |
 | `/wechat login --force` | 强制重新扫码 |
 | `/wechat start` | 启动微信连接 |
 | `/wechat stop` | 停止并释放锁 |

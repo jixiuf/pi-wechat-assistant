@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.3] - 2026-10-14
 
+### Added
+- Interactive takeover: `/wechat start` on a lock held by another live pi session opens a TUI dialog to kick it; the old session detects the ownership change within seconds, warns, and stops itself. A watchdog also guards running bridges against out-of-band takeover.
+  交互式接管：`/wechat start` 遇到其他活跃 pi 会话持锁时弹窗询问是否踢掉；旧会话数秒内检测到锁易主、警告并自动停止。看门狗同时守护运行中的桥接免受绕过接管的影响。
+- `/wechat login` auto-starts the bridge in the current session after a successful login.
+  `/wechat login` 登录成功后在当前会话自动启动桥接。
+
 ### Fixed
 - Share bridge-lock diagnostics across start, status, and sending guards (PR #13). Report other-process ownership without claiming polling health; keep unreadable locks and permission failures distinct from exited processes. Correct the stop command to `/wechat stop`.
   启动、状态查询及发送守卫共用桥接锁诊断（PR #13）；指出其他进程持锁而不误称轮询正常，区分不可读锁、权限错误与已退出进程，并修正停止命令为 `/wechat stop`。

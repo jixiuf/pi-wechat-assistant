@@ -18,6 +18,7 @@ import {
   releaseLock,
   saveConfig,
   saveCredentials,
+  stealLock,
 } from './auth.js'
 import { WeixinClient, SessionExpiredError, type ApiCallResult } from './client.js'
 import { MessageQueue, getImageBatchWaitMs, getImageMaxBytes } from './queue.js'
@@ -38,6 +39,7 @@ export interface CommandDeps {
   loadClient: () => Promise<WeixinClient | null>
   isRunning: () => boolean
   setRunning: (v: boolean) => void
+  stealLock: () => Promise<void>
   getPollAbort: () => AbortController | null
   setPollAbort: (c: AbortController | null) => void
   queue: MessageQueue
@@ -59,6 +61,7 @@ async function cmdLogin(args: string, ctx: Ctx, deps: CommandDeps): Promise<void
     const cached = await deps.loadClient()
     if (cached) {
       deps.notify(`已加载本地微信凭证: ${getCredentialsPath()}`, 'info')
+      if (!deps.isRunning()) await cmdStart('', ctx as ExtensionCommandContext, deps)
       return
     }
   }
@@ -100,6 +103,7 @@ async function cmdLogin(args: string, ctx: Ctx, deps: CommandDeps): Promise<void
         deps.setClient(newClient)
         deps.notify('微信登录成功 ✅', 'info')
         deps.updateStatusBar()
+        if (!deps.isRunning()) await cmdStart('', ctx as ExtensionCommandContext, deps)
         return
       }
 
@@ -129,8 +133,16 @@ async function cmdStart(_args: string, ctx: ExtensionCommandContext, deps: Comma
   if (deps.isRunning()) { deps.notify('微信桥接已经在运行', 'info'); return }
   const owner = await getBridgeLockState()
   if (owner.kind === 'other' || owner.kind === 'unknown') {
-    deps.notify(describeBridgeLock(owner), 'error')
-    return
+    if (owner.kind === 'other' && ctx.hasUI) {
+      const takeover = '踢掉该会话并在本会话启动（原会话将自动停止）'
+      const choice = await ctx.ui.select(`微信桥接由其他 pi 会话持有（PID ${owner.pid}）`, [takeover, '取消'])
+      if (choice !== takeover) { deps.notify('已取消，未改动其他会话的微信桥接。', 'info'); return }
+      await deps.stealLock()
+      deps.notify(`已接管微信桥接，原会话（PID ${owner.pid}）将自动停止`, 'info')
+    } else {
+      deps.notify(describeBridgeLock(owner), 'error')
+      return
+    }
   }
   const activeClient = await deps.loadClient()
   if (!activeClient) { deps.notify('未找到微信凭证，请先执行 /wechat login', 'error'); return }
@@ -139,7 +151,19 @@ async function cmdStart(_args: string, ctx: ExtensionCommandContext, deps: Comma
     await ctx.waitForIdle()
   }
   const lockResult = await deps.lock()
-  if (!lockResult.success) { deps.notify(lockResult.message, 'error'); return }
+  if (!lockResult.success) {
+    const state = await getBridgeLockState()
+    if (state.kind === 'other' && ctx.hasUI) {
+      const takeover = '踢掉该会话并在本会话启动（原会话将自动停止）'
+      const choice = await ctx.ui.select(`微信桥接由其他 pi 会话持有（PID ${state.pid}）`, [takeover, '取消'])
+      if (choice !== takeover) { deps.notify('已取消，未改动其他会话的微信桥接。', 'info'); return }
+      await deps.stealLock()
+      deps.notify(`已接管微信桥接，原会话（PID ${state.pid}）将自动停止`, 'info')
+    } else {
+      deps.notify(lockResult.message, 'error')
+      return
+    }
+  }
   try {
     await deps.prepareBridge()
   } catch (error) {

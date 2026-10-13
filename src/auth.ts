@@ -187,6 +187,11 @@ export async function acquireLock(sessionId: string): Promise<{ success: boolean
   return { success: true, message: '成功获取锁' }
 }
 
+/** 接管锁：仅在用户通过 TUI 明确确认后调用；原会话会检测到锁易主并自动停止。 */
+export async function stealLock(sessionId: string): Promise<void> {
+  await _writeLockFile(sessionId)
+}
+
 export async function releaseLock(sessionId: string): Promise<void> {
   const existing = await _readLockFile()
   if (existing?.sessionId === sessionId) {
