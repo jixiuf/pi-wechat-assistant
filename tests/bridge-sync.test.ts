@@ -384,47 +384,47 @@ describe('bridge bidirectional sync and lifecycle', () => {
   })
 
   it('keeps the footer compact before and after acquiring context or sending successfully', async () => {
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⏸`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⏸]`)
     await command('start')
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⇄ ▶`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶]`)
     state.client.hasContextToken = true
     state.client.onStatusChange?.()
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⇄ ▶`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶]`)
     state.client.lastSend = { success: true, at: '2026-10-13T10:00:00Z' }
     state.client.onStatusChange?.()
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⇄ ▶`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶]`)
     await command('stop')
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⏸`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⏸]`)
   })
 
   it('refreshes the compact sync mode indicator immediately when toggled', async () => {
     await command('start')
     await command('config bidirectional off')
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ▶`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ▶]`)
     await command('config bidirectional on')
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⇄ ▶`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶]`)
   })
 
   it('shows a queue count only while messages are pending', async () => {
     await command('start')
     const pending = vi.spyOn(state.queue, 'pending', 'get').mockReturnValue(3)
     state.client.onStatusChange?.()
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⇄ ▶ | 待处理:3`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶ | 待处理:3]`)
     pending.mockReturnValue(0)
     state.client.onStatusChange?.()
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⇄ ▶`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶]`)
   })
 
   it('surfaces send failure without error details and clears it on the next successful send', async () => {
     await command('start')
     state.client.lastSend = { success: false, at: '2026-10-13T10:00:00Z', error: 'network timeout' }
     state.client.onStatusChange?.()
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⇄ ▶ | 发送失败`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶ | 发送失败]`)
     await command('status')
     expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining('失败: network timeout'), 'info')
     state.client.lastSend = { success: true, at: '2026-10-13T10:01:00Z' }
     state.client.onStatusChange?.()
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⇄ ▶`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶]`)
     await command('status')
     expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining('API 返回成功（不代表已读）'), 'info')
   })
@@ -435,9 +435,9 @@ describe('bridge bidirectional sync and lifecycle', () => {
     vi.spyOn(state.queue, 'pending', 'get').mockReturnValue(2)
     state.client.lastSend = { success: false, at: '2026-10-13T10:00:00Z', error: 'rejected' }
     state.client.onStatusChange?.()
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ▶ | 待处理:2 | 发送失败`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ▶ | 待处理:2 | 发送失败]`)
     await command('stop')
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `微信 ⏸`)
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⏸]`)
   })
 
   it('shows the default template while the bridge runs with source rules on by default', async () => {

@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- Footer icons unify to standard Unicode (green `微信` label, `⇄`, green `▶` / red `⏸`) so every terminal renders them at a consistent size without Nerd Fonts or per-font fallback surprises.
-  底部图标统一为标准 Unicode（绿色 `微信`、`⇄`、绿色 `▶` / 红色 `⏸`），不依赖 Nerd Font，任何终端尺寸一致。
+- Footer returns to a bracketed status chip with standard Unicode glyphs (green `微信` label, `⇄`, green `▶` / red `⏸`) so every terminal renders them at a consistent size without Nerd Fonts or per-font fallback surprises.
+  底部恢复为方括号状态徽章，使用标准 Unicode（绿色 `微信`、`⇄`、绿色 `▶` / 红色 `⏸`），不依赖 Nerd Font，任何终端尺寸一致。
 
 ### Fixed
 - Notify on final settlement for hosts that expose `agent_settled` but never emit `agent_before_settle` (e.g. Pi 0.84.x): until the host is seen emitting a boundary event, a settled run with an observed error notifies directly; capable hosts keep suppressing recovered retries.

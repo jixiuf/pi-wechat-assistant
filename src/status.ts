@@ -22,5 +22,5 @@ export function formatWechatStatus(state: WechatStatusState, env: NodeJS.Process
     : `${logo} ${indicator}`]
   if (state.running && state.pending > 0) parts.push(`待处理:${state.pending}`)
   if (state.running && state.sendFailed) parts.push('发送失败')
-  return parts.join(' | ')
+  return `[${parts.join(' | ')}]`
 }
