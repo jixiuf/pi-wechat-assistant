@@ -5,9 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-13
 
 ### Added
+- Bidirectional TUI/WeChat sync by default, with a configurable switch and online/offline notifications.
+  默认启用 TUI/微信双向同步，提供配置开关及上下线通知。
 - Optional `[微信]` source marker and user-editable reply template, sharing one switch (on by default), with guards for known local question tools (#16).
   可选微信来源标识与可编辑回复模板共用一个开关（默认开启），并守卫已知本机提问工具（#16）。
 - `/wechat config source on|off` and `/wechat prompt show|init|reload`; published Pi API checks for 0.73.1 through 1.2.0.
@@ -24,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   微信排版保留完整 URL、将表格转为逐行说明，并支持保留原文的代码分块与 Unicode 安全切分。
 
 ### Fixed
+- Declare host-provided TypeBox as an optional peer dependency to remove Pi startup warnings (#12, #15; thanks Omega-L).
+  将宿主提供的 TypeBox 声明为可选 peer dependency，消除 Pi 启动警告（#12、#15；感谢 Omega-L）。
+- Restore the bound recipient without waiting for an inbound message, and retry rejected-context sends once without the context token.
+  无需等待微信先发消息即可恢复绑定接收方，上下文凭据被拒绝时尝试一次不携带该凭据的发送。
 - Notifications no longer print to stdout while the TUI is attached (debug output painted notify text over the editor); debug logging stays in the debug file.
   修复 TUI 模式下通知同时打印到 stdout、把文字绘制进输入框区域的问题；调试日志仅写入调试文件。
 - Send WeChat text verbatim instead of trimming it, preserving code-chunk indentation and trailing newlines.
