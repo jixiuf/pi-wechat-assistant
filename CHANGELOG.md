@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.3] - 2026-10-14
 
 ### Fixed
 - Share bridge-lock diagnostics across start, status, and sending guards (PR #13). Report other-process ownership without claiming polling health; keep unreadable locks and permission failures distinct from exited processes. Correct the stop command to `/wechat stop`.
@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   仅启动时注册发送工具；停止时隐藏工具并清除其提示词说明，旧版 Pi 通过活动工具清理及执行守卫兜底；重启恢复可用性且不重复注册条目。
 - Add a transient stopped-tool notice to model context after stopping; remove it on restart without persisting it in session history or changing the system prompt.
   停止后在模型上下文中临时说明发送工具不可用，重启时移除；不写入会话历史、不改变系统提示词。
+
+### Thanks
+- Thanks to [@Nike163](https://github.com/Nike163) for the cross-process diagnostic proposal in [PR #13](https://github.com/shenjiecode/pi-wechat-assistant/pull/13). This release covers the request through the main-branch implementation and extends it to start/status diagnostics.
+  感谢 [@Nike163](https://github.com/Nike163) 在 [PR #13](https://github.com/shenjiecode/pi-wechat-assistant/pull/13) 中提出跨进程诊断方案；本版通过主分支实现覆盖该需求，并扩展到启动与状态查询。
 
 ## [0.4.2] - 2026-10-13
 
