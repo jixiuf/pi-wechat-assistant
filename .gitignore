@@ -5,3 +5,8 @@ dist/
 .playwright-mcp/
 coverage/
 page-*.yml
+.pi-wechat-files/
+.env
+.env.*
+!.env.example
+*.log

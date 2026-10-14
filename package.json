@@ -26,11 +26,13 @@
     "agent"
   ],
   "scripts": {
+    "check": "npm run typecheck && npm test && npm run check:package",
+    "check:package": "node scripts/check-package.mjs",
     "typecheck": "tsc --noEmit",
     "typecheck:pi": "node scripts/check-pi-compat.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "preversion": "npm run typecheck && npm test",
+    "preversion": "npm run check && npm run typecheck:pi",
     "prepack": "npm run typecheck"
   },
   "engines": {
@@ -44,7 +46,7 @@
     "assets",
     "LICENSE",
     "README.md",
-    "README.en.md",
+    "README.zh.md",
     "CHANGELOG.md"
   ],
   "pi": {
