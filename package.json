@@ -26,7 +26,8 @@
     "agent"
   ],
   "scripts": {
-    "check": "npm run typecheck && npm test && npm run check:package",
+    "check": "npm run typecheck && npm test && npm run check:docs && npm run check:package",
+    "check:docs": "node scripts/check-docs.mjs",
     "check:package": "node scripts/check-package.mjs",
     "typecheck": "tsc --noEmit",
     "typecheck:pi": "node scripts/check-pi-compat.mjs",

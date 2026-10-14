@@ -6,6 +6,8 @@ Write the complete English content in this section, followed by the complete cor
 
 Describe the problem and resulting behavior.
 
+Target `develop` for normal changes, or `main` for a release or urgent fix. State the target and reason here. Use a merge commit for `develop -> main`; the maintainer reviews and merges manually after CI passes.
+
 ### Validation
 
 - [ ] `npm run check`
@@ -26,6 +28,8 @@ Link related issues and describe user-facing or compatibility changes, if any.
 ### 摘要
 
 说明问题与修改后的行为。
+
+普通改动以 `develop` 为目标，发布或紧急修复以 `main` 为目标；在此说明目标与原因。`develop → main` 使用合并提交；CI 通过后由维护者检查并手动合并。
 
 ### 验证
 

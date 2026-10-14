@@ -1,6 +1,6 @@
 # Security
 
-English | [简体中文](SECURITY.zh.md)
+English | [简体中文](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/SECURITY.zh.md)
 
 This extension handles local login credentials, message-send credentials, conversation content and project files. Never include real tokens, account identifiers, private messages or unredacted logs in public issues or pull requests.
 

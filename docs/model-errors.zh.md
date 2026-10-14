@@ -1,6 +1,6 @@
 # 模型错误通知
 
-[English](model-errors.md) | 简体中文
+[English](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/model-errors.md) | 简体中文
 
 `/wechat start` 启动后，模型请求失败会通知当前回复接收方，无需新增配置。关闭双向同步时，只通知桥接收到的微信请求；开启时也同步电脑端请求的错误。关闭来源标识不会关闭错误通知。
 

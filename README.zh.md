@@ -72,7 +72,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 
 - [配置项、默认值与生效范围](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/settings.zh.md)
 - [回复模板、消息格式与工具兼容](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/wechat-source.zh.md)
-- [完整文档目录](docs/README.zh.md)
+- [完整文档目录](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/README.zh.md)
 
 ### 使用边界
 
@@ -85,7 +85,7 @@ pi install git:github.com/shenjiecode/pi-wechat-assistant
 
 ### 参与开发
 
-开发环境、检查命令与提交约定见[贡献指南](docs/CONTRIBUTING.zh.md)；目录职责与运行流程见[架构说明](docs/architecture.zh.md)。安全问题请参阅[安全说明](docs/SECURITY.zh.md)。
+开发环境、检查命令与提交约定见[贡献指南](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/CONTRIBUTING.zh.md)；目录职责与运行流程见[架构说明](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/architecture.zh.md)。安全问题请参阅[安全说明](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/SECURITY.zh.md)。
 
 ---
 

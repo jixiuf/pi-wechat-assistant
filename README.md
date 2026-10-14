@@ -72,7 +72,7 @@ Settings and the optional reply template live in `~/.pi/agent/wechat-assistant/`
 
 - [Settings, defaults, and scope](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/settings.md)
 - [Reply templates, formatting, and tool compatibility](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/wechat-source.md)
-- [All documentation](docs/README.md)
+- [All documentation](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/README.md)
 
 ### Limitations
 
@@ -85,7 +85,7 @@ Development checks ran on Windows, with two-session handoff verified on Linux. A
 
 ### Contributing
 
-See the [contributing guide](docs/CONTRIBUTING.md) for setup, checks, and submission conventions, and [architecture](docs/architecture.md) for module responsibilities and runtime flow. For sensitive reports, see [security](docs/SECURITY.md).
+See the [contributing guide](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/CONTRIBUTING.md) for setup, checks, and submission conventions, and [architecture](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/architecture.md) for module responsibilities and runtime flow. For sensitive reports, see [security](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/SECURITY.md).
 
 ---
 
