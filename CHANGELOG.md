@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.6.1] - 2026-10-15
+
+### English
+
+- Organize source and tests by responsibility while preserving the public extension entry and runtime behavior.
+- Split English and Chinese documentation into separate files, add contribution and architecture guides, and fix navigation links when guides are displayed outside their source directory.
+- Add documentation-link and package-content checks, Linux/Windows CI, and issue/PR templates.
+- Document the develop/main workflow and version tags; require release commits to belong to main before publishing.
+
+### 中文
+
+- 按职责整理源码与测试，保持扩展公开入口和运行行为不变。
+- 拆分中英文说明文档，补充贡献指南与架构说明，修复文档在其他入口展示时的导航链接。
+- 增加文档链接和发布包内容检查、Linux/Windows CI，以及 issue/PR 模板。
+- 明确 develop/main 开发流程和版本标签约定，发布前验证提交已合入 main。
+
 ## [0.6.0] - 2026-10-14
 
 ### Changed
