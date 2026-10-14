@@ -1,23 +1,40 @@
-import { loadConfig, getConfigCache } from '../bridge/config.js'
 // ============================================================================
 // pi-wechat-assistant — 微信作为 pi TUI 的移动端分身
 // ============================================================================
 
 import { randomUUID } from 'node:crypto'
+import * as fs from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 // Type-only legacy import also works in hosts that only provide @earendil-works.
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
+// @ts-ignore — @earendil-works is the current package, but the older package still carries TS declarations used for compatibility here
+import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { SessionExpiredError, WeixinClient } from '../wechat/client.js'
-import { acquireLock, releaseLock, requestHandoff, hasHandoffRequest, loadCredentials, getBridgeLockState } from '../bridge/auth.js'
+import { acquireLock, releaseLock, loadCredentials } from '../bridge/auth.js'
 import { registerWechatTools as registerSendTools, stoppedBridgeReason } from './send-tools.js'
-import { debugLog } from '../shared/logger.js'
+import { debugLog, isDebugEnabled } from '../shared/logger.js'
 import { splitAndFilterMarkdown } from '../messaging/message.js'
 import { MessageQueue } from '../bridge/queue.js'
 import { handleRemoteCommand, type RemoteCommandDeps } from './remote-commands.js'
-import { registerCommands, startBridge, cancelBridgeStart, type CommandDeps } from './commands.js'
+import {
+  NEW_SESSION_CONFIRM_REPLY,
+  clearNewSessionConfirm,
+  clearSwitchConfirm,
+  peekNewSessionConfirm,
+  peekSwitchConfirm,
+  setSwitchConfirmMessage,
+  takeNewSessionConfirm,
+  takeSwitchConfirm,
+} from '../session-confirm.js'
+import { registerCommands, startBridge, type CommandDeps } from './commands.js'
+import { WechatGateway } from '../gateway.js'
 import { formatError, isAbortError, extractTextFromMessageContent } from '../shared/utils.js'
 import { isAuthorizedWeChatSender } from '../wechat/security.js'
+import type { WechatQuestionBridge } from '../questionnaire.js'
+import { loadConfig, getConfigCache } from '../bridge/config.js'
 import {
   POLL_RETRY_BASE_MS,
   POLL_RETRY_MAX_MS,
@@ -71,10 +88,13 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   let running = false
   let agentIdle = true
   let agentPreparing = false
+  let currentInstanceName = 'local'
   let pollAbort: AbortController | null = null
   let pollTask: Promise<void> | null = null
   let stopping: Promise<void> | null = null
   let latestCtx: Ctx | null = null
+  /** 本闭包是否已被会话替换/重载废弃（旧闭包的在途消息一律不再处理） */
+  let superseded = false
   let wechatFilesDir: string | null = null
 
   const turn = new TurnContext()
@@ -98,21 +118,40 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   function log(message: string): void { debugLog(message) }
 
+  /**
+   * 安全获取 ctx UI。latestCtx?.hasUI 的可选链只防 null，不防 getter 抛错：
+   * ctx 在 reload/newSession 后会变 stale，hasUI getter 内部 assertActive 会直接 throw，
+   * 导致 notify/updateStatusBar 抛异常 → 异步调用链 unhandledRejection → Node 进程崩溃。
+   * 这里 try/catch 降级为 console 输出（仅首次记录），保证进程不崩。
+   */
+  let staleCtxWarned = false
+  function safeUI(): NonNullable<Ctx['ui']> | null {
+    try {
+      return latestCtx?.hasUI ? latestCtx.ui : null
+    } catch {
+      if (!staleCtxWarned) {
+        staleCtxWarned = true
+        debugLog('[wechat-assistant] ctx 已 stale（reload/newSession 后旧 ctx 被回收），UI 降级为 console 输出')
+      }
+      return null
+    }
+  }
+
   function notify(message: string, level: 'info' | 'warning' | 'error' = 'info'): void {
-    if (latestCtx?.hasUI) {
-      // Never also print to stdout here: in TUI/RPC modes a stray console.log
-      // paints over the interface (it once showed up inside the editor box).
-      latestCtx.ui.notify(message, level)
-      return
+    const ui = safeUI()
+    if (ui) {
+      ui.notify(message, level)
+      if (!isDebugEnabled()) return
     }
     const printer = level === 'error' ? console.error : console.log
     printer(`[wechat-assistant/${level}] ${message}`)
   }
 
   function updateStatusBar(): void {
-    if (!latestCtx?.hasUI) return
-    if (!client && !running) { latestCtx.ui.setStatus('wechat', ''); return }
-    latestCtx.ui.setStatus('wechat', formatWechatStatus({
+    const ui = safeUI()
+    if (!ui) return
+    if (!client && !running) { ui.setStatus('wechat', ''); return }
+    ui.setStatus('wechat', formatWechatStatus({
       running,
       bidirectional: getConfigCache().bidirectionalSync === true,
       pending: queue.pending,
@@ -120,21 +159,85 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     }))
   }
 
-  // --- 锁 ---
+  // --- 锁：优先 hub 全局锁（跨机互斥），hub 不可用时降级本地锁（同机互斥） ---
 
   function getLockId(): string {
     if (!lockSessionId) lockSessionId = `pi-wechat-${process.pid}-${randomUUID()}`
     return lockSessionId
   }
 
+  interface HubBridge {
+    coordinatorTryLock?: (name: string, pid: number, capability?: string, force?: boolean) => boolean
+    coordinatorReleaseLock?: (name: string, capability?: string, pid?: number) => void
+    getInstanceName?: () => string
+    getCoordinatorUrl?: () => string | undefined
+    requestRemoteLock?: (
+      baseUrl: string, name: string, pid: number, capability?: string, force?: boolean,
+    ) => Promise<{ ok: boolean; unreachable?: boolean; holder?: { name?: string } | null }>
+    releaseRemoteLock?: (baseUrl: string, name: string, capability?: string) => Promise<void>
+  }
+
+  function getHubBridge(): HubBridge | null {
+    return ((globalThis as Record<string, unknown>).__PI_HUB__ ?? null) as HubBridge | null
+  }
+
+  /** 锁持有者名：优先 hub 实例名（保证与协调中心一致），否则本机 cwd 名 */
+  function getLockHolderName(): string {
+    return getHubBridge()?.getInstanceName?.() || currentInstanceName || 'local'
+  }
+
+  /** 客户端模式：协调中心 URL 存在时锁走远程 HTTP（跨机唯一仲裁）；否则本地锁 */
+  function getCoordUrl(): string | undefined {
+    return getHubBridge()?.getCoordinatorUrl?.()
+  }
+
   async function lock(): Promise<{ success: boolean; message: string }> {
-    const id = getLockId()
-    const result = await acquireLock(id)
-    if (result.success) lockSessionId = id
+    const hub = getHubBridge()
+    const coordUrl = getCoordUrl()
+    const holderName = getLockHolderName()
+    if (coordUrl && hub?.requestRemoteLock) {
+      // 客户端 → 协调中心请求全局锁（服务器端唯一仲裁）
+      const res = await hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat')
+      if (res.ok) {
+        lockSessionId = getLockId()
+        return { success: true, message: '已获取全局锁' }
+      }
+      if (res.unreachable) {
+        // 协调中心不可达（服务器 pi 可能已停）→ 降级本地锁接管，不让位
+        log(`协调中心不可达，降级本地锁接管微信`)
+        if (hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')) {
+          lockSessionId = getLockId()
+          return { success: true, message: '协调中心不可达，已本地接管' }
+        }
+        return { success: false, message: '本地锁获取失败' }
+      }
+      const holder = res.holder?.name
+      return { success: false, message: `微信已被其他实例接管 (${holder ?? '未知'})` }
+    }
+    if (hub?.coordinatorTryLock) {
+      // 服务器模式：本地全局锁文件
+      const ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
+      if (ok) {
+        lockSessionId = getLockId()
+        return { success: true, message: '已获取全局锁' }
+      }
+      return { success: false, message: '微信已被其他 pi 实例接管 (capability=wechat)' }
+    }
+    // 降级：本地锁（无 hub 时的同机互斥）
+    const result = await acquireLock(getLockId())
+    if (result.success) lockSessionId = getLockId()
     return result
   }
 
   async function unlock(): Promise<void> {
+    const hub = getHubBridge()
+    const coordUrl = getCoordUrl()
+    const holderName = getLockHolderName()
+    if (coordUrl && hub?.releaseRemoteLock) {
+      await hub.releaseRemoteLock(coordUrl, holderName, 'wechat')
+    } else if (hub?.coordinatorReleaseLock) {
+      hub.coordinatorReleaseLock(holderName, 'wechat', process.pid)
+    }
     if (lockSessionId) await releaseLock(lockSessionId)
     lockSessionId = null
   }
@@ -170,45 +273,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     setClient(null)
   }
 
-  let bridgeWatch: ReturnType<typeof setInterval> | null = null
-
-  function stopBridgeWatch(): void {
-    if (bridgeWatch) { clearInterval(bridgeWatch); bridgeWatch = null }
-  }
-
-  let checkingOwnership = false
-  async function checkBridgeOwnership(): Promise<void> {
-    if (!running || checkingOwnership || !lockSessionId) return
-    checkingOwnership = true
-    const id = lockSessionId
-    try {
-      const requested = await hasHandoffRequest(id)
-      if (!running || lockSessionId !== id) return
-      if (requested) {
-        notify('收到微信桥接交接请求，正在停止本会话桥接并释放锁…', 'warning')
-        await stopBridge({ releaseLock: true })
-        return
-      }
-      const state = await getBridgeLockState()
-      if (!running || lockSessionId !== id) return
-      if (state.kind === 'current' && state.sessionId === id) return
-      notify('微信桥接锁归属已变化或无法确认，本会话正在停止，请检查 /wechat status。', 'warning')
-      await stopBridge({ releaseLock: true })
-    } catch (error) {
-      log(`桥接交接检查失败: ${formatError(error)}`)
-    } finally { checkingOwnership = false }
-  }
-
-  function startBridgeWatch(): void {
-    stopBridgeWatch()
-    bridgeWatch = setInterval(() => { void checkBridgeOwnership() }, 1_000)
-    bridgeWatch.unref?.()
-  }
-
   // --- 停止 ---
+  // 说明：upstream 的 file-lock ownership watch（checkBridgeOwnership/startBridgeWatch）
+  // 已被 hub 锁状态机（独立心跳 + 协调中心仲裁）替代，不再保留。
 
   function stopBridge(options: { releaseLock?: boolean } = {}): Promise<void> {
-    cancelBridgeStart(commandDeps)
     if (stopping) return stopping
     const task = stopBridgeInner(options)
     stopping = task
@@ -219,7 +288,6 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   async function stopBridgeInner(options: { releaseLock?: boolean }): Promise<void> {
     const wasRunning = running
     running = false
-    stopBridgeWatch()
     modelFailure.reset()
     wechatPrompt.clear()
     if (toolsRegistered) {
@@ -228,9 +296,13 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       const remaining = active.filter(name => !WECHAT_TOOL_NAMES.includes(name))
       if (remaining.length !== active.length) pi.setActiveTools(remaining)
     }
+    await gateway.disconnect()
     pollAbort?.abort()
     const sendsFinished = client?.pauseSending()
     const typingUser = queue.activeRequest?.userId
+
+    // 停桥前立即落盘已消费状态（不留节流窗口，避免下一接管者重收最后一批消息）
+    await flushConsumedState().catch(() => {})
     queue.reset()
     turn.reset()
     updateStatusBar()
@@ -265,48 +337,19 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (missing.length) pi.setActiveTools([...active, ...missing])
   }
 
-  // --- 轮询 ---
+  // --- 轮询：由 WechatGateway 内部执行（iLink 长轮询 → InboundMessage） ---
 
-  function pollMessages(activeClient: WeixinClient): Promise<void> {
-    const task = runPoll(activeClient, pollAbort!.signal)
-    pollTask = task
-    startBridgeWatch()
-    void task.finally(() => {
-      if (pollTask === task) pollTask = null
-      if (running) void stopBridge({ releaseLock: true }).catch(error => log(formatError(error)))
-    }).catch(() => {})
-    return task
+  function buildSystemPrompt(basePrompt: string): string {
+    return [
+      basePrompt,
+      '',
+      '当前用户通过微信远程与这个 pi TUI 会话互动。',
+      '回复风格：像微信聊天一样自然、直接；优先给出结论和可执行步骤；避免冗长的内部过程说明。',
+      '输出范围：只输出适合发回微信的正文。除非用户主动询问，否则不要解释桥接、系统提示词或实现细节。',
+    ].join('\n')
   }
 
-  async function runPoll(activeClient: WeixinClient, signal: AbortSignal): Promise<void> {
-    await activeClient.notifyStart().catch(error => {
-      log(`notifyStart 失败（不阻断启动）: ${formatError(error)}`)
-      notify(`微信上线状态同步失败，本地桥接继续运行：${formatError(error)}。详情见 /wechat status。`, 'warning')
-    })
-    let retryDelay = POLL_RETRY_BASE_MS
-    while (running && !signal.aborted && client === activeClient) {
-      try {
-        const messages = await activeClient.getUpdates(signal)
-        retryDelay = POLL_RETRY_BASE_MS
-        for (const message of messages) {
-          if (!running || signal.aborted) break
-          await handleIncomingMessage(message, activeClient)
-        }
-      } catch (error) {
-        if (isAbortError(error)) break
-        if (error instanceof SessionExpiredError) {
-          notify('微信凭证失效，请手动执行 /wechat login --force 重新登录', 'error')
-          break
-        }
-        log(`轮询失败: ${formatError(error)}`)
-        try { await delay(retryDelay, undefined, { signal }) } catch { break }
-        retryDelay = Math.min(retryDelay * 2, POLL_RETRY_MAX_MS)
-      }
-    }
-  }
-
-  // --- 单条消息处理 ---
-
+  // --- 单条消息处理（gateway.handleUserMessage 回调） ---
   async function handleIncomingMessage(message: IncomingMessage, activeClient: WeixinClient): Promise<void> {
     // 客户端入口已有同样校验；这里保留边界防御，防止未来新增调用路径时绕过。
     if (!isAuthorizedWeChatSender(message.raw.from_user_id, activeClient.userId)) {
@@ -314,6 +357,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       return
     }
     log(`收到消息: type=${message.type}, text=${message.text?.slice(0, 50)}, images=${message.imageUrls.length}`)
+
+    // 持久化最后一条微信文本消息（接管通知用，跨实例共享）
+    if (message.text && message.type === 'text') {
+      persistLastWechatMessage(message.userId, message.text)
+    }
 
     if (UNSUPPORTED_TYPES.has(message.type)) {
       const reply = UNSUPPORTED_REPLY[message.type] ?? UNSUPPORTED_REPLY['unknown']
@@ -330,7 +378,355 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       if (handled) return
     }
 
+    // 待答问题拦截：目标用户的文字消息作为答案消费（含语音转文字、图片+文字）
+    if (message.text) {
+      if (queue.answerPendingQuestion(message.userId, message.text)) {
+        log(`[QUESTION-ANSWER] consumed text as answer from ${message.userId}`)
+        return
+      }
+    } else if (queue.pendingQuestionUserId === message.userId) {
+      // 等待答案期间收到无文字消息（纯图片/文件等）→ 提示重发，不消费
+      log(`[QUESTION-ANSWER] non-text message while waiting, prompting retry`)
+      try {
+        await activeClient.sendText(message.userId, '⏳ 当前正在等待文字答案，请用文字回复（回复 0 取消）')
+      } catch (err) {
+        log(`回复提示失败: ${formatError(err)}`)
+      }
+      return
+    }
+
+    // 触发“TUI 提问转微信”:若有挂起的 TUI 提问(ask_user_question 三路等待中),
+    // 通知其把提问转成微信问卷——用户此刻在微信发消息,桌面弹窗对它不可见。
+    // 在入队之前同步触发:信号只 resolve 等待中的 Promise,问卷发送在后续 microtask,
+    // 不会把本条消息误吞为问卷答案。
+    const pendingTui = (globalThis as unknown as {
+      __PENDING_TUI_QUESTION__?: { onWechatMessage?: (userId: string) => unknown };
+    }).__PENDING_TUI_QUESTION__;
+    try {
+      pendingTui?.onWechatMessage?.(message.userId);
+    } catch {}
+
     queue.enqueue(message)
+  }
+
+  // --- 已消费标记（推送即消费，跨实例/跨机共享） ---
+  // 语义：消息被本实例拉取并推送的瞬间即标记已消费，不论后续是否真正从队列消费。
+  //  /use 切换后新接管者从协调中心恢复游标 + 已消费集，不重收旧实例已推送的消息。
+  //  协调中心不可达时降级本地文件（同机接管仍有效；跨机无协调中心时锁仲裁本就不可用）。
+
+  interface WechatPollState { cursor: string; messageIds: Record<string, number>; ts: number }
+  interface WechatStateUpdate { cursor?: string; messageIds?: string[] }
+
+  /** 已消费 messageId 内存集：id → 标记时间（含恢复的历史 + 本实例拉取的） */
+  const consumedMessageIds = new Map<string, number>()
+  /** 本实例拉取的消息：id → 标记时间（去重时排除，避免吞掉自己刚拉取的消息） */
+  const selfFetchedIds = new Map<string, number>()
+  const CONSUMED_TTL_MS = Number(process.env.PI_WECHAT_MSGID_TTL_MS) || 30 * 60_000
+
+  function pruneConsumed(): void {
+    const now = Date.now()
+    for (const [id, ts] of consumedMessageIds) {
+      if (now - ts > CONSUMED_TTL_MS) consumedMessageIds.delete(id)
+    }
+    for (const [id, ts] of selfFetchedIds) {
+      if (now - ts > CONSUMED_TTL_MS) selfFetchedIds.delete(id)
+    }
+  }
+
+  /** 是否为其他实例已消费过的重投消息（本实例拉取的不算） */
+  function isDuplicateConsumed(messageId: string): boolean {
+    return consumedMessageIds.has(messageId) && !selfFetchedIds.has(messageId)
+  }
+
+  /** hub 桥的 wechat-state 读写（协调中心模式本地/客户端模式远程，与 lastMsg 同模式） */
+  function getHubWechatStateBridge(): {
+    getWechatState?: () => Promise<WechatPollState | null>
+    pushWechatState?: (data: WechatStateUpdate) => Promise<void>
+  } | null {
+    return ((globalThis as Record<string, unknown>).__PI_HUB__ ?? null) as ReturnType<typeof getHubWechatStateBridge>
+  }
+
+  const WECHAT_STATE_FILE = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'wechat-state.json')
+
+  function readLocalWechatState(): WechatPollState | null {
+    try {
+      return JSON.parse(fs.readFileSync(WECHAT_STATE_FILE, 'utf8')) as WechatPollState
+    } catch {
+      return null
+    }
+  }
+
+  function writeLocalWechatState(update: WechatStateUpdate): void {
+    try {
+      const now = Date.now()
+      const prev = readLocalWechatState()
+      const messageIds: Record<string, number> = { ...(prev?.messageIds ?? {}) }
+      for (const id of update.messageIds ?? []) {
+        if (id) messageIds[id] = messageIds[id] ?? now
+      }
+      const merged: WechatPollState = {
+        cursor: update.cursor || prev?.cursor || '',
+        messageIds,
+        ts: now,
+      }
+      // 本地只保留 TTL 内的，防文件无限增长
+      const kept: Record<string, number> = {}
+      for (const [id, ts] of Object.entries(messageIds)) {
+        if (now - ts <= CONSUMED_TTL_MS) kept[id] = ts
+      }
+      merged.messageIds = kept
+      fs.writeFileSync(WECHAT_STATE_FILE, JSON.stringify(merged), { mode: 0o600 })
+    } catch {
+      // ignore
+    }
+  }
+
+  function buildStatePayload(cursor: string): WechatStateUpdate {
+    pruneConsumed()
+    const ids = [...consumedMessageIds.entries()]
+      .sort((a, b) => a[1] - b[1])
+      .slice(-200)
+      .map(([id]) => id)
+    return { cursor, messageIds: ids }
+  }
+
+  function dispatchState(payload: WechatStateUpdate): void {
+    const hub = getHubWechatStateBridge()
+    if (hub?.pushWechatState) {
+      void hub.pushWechatState(payload).catch(() => writeLocalWechatState(payload))
+    } else {
+      writeLocalWechatState(payload)
+    }
+  }
+
+  /** 立即推送并等待完成（停桥/退出路径用，防进程先于 POST 结束） */
+  async function dispatchStateAwait(payload: WechatStateUpdate): Promise<void> {
+    const hub = getHubWechatStateBridge()
+    if (hub?.pushWechatState) {
+      try {
+        await hub.pushWechatState(payload)
+        return
+      } catch {
+        // fallthrough 到本地落盘
+      }
+    }
+    writeLocalWechatState(payload)
+  }
+
+  /** 节流上报（2s 尾沿）：轮询高频触发时合并写 */
+  let statePushTimer: ReturnType<typeof setTimeout> | null = null
+  let lastFetchedCursor = ''
+  function reportConsumed(cursor: string): void {
+    if (cursor) lastFetchedCursor = cursor
+    if (statePushTimer) return
+    statePushTimer = setTimeout(() => {
+      statePushTimer = null
+      dispatchState(buildStatePayload(lastFetchedCursor))
+    }, 2000)
+  }
+
+  /** 停桥/退出前立即落盘，不留节流窗口（等待写入完成） */
+  async function flushConsumedState(): Promise<void> {
+    if (statePushTimer) { clearTimeout(statePushTimer); statePushTimer = null }
+    if (!client) return
+    await dispatchStateAwait(buildStatePayload(client.cursorValue))
+  }
+
+  /** 接管/启动前恢复已消费状态：优先协调中心（跨机权威），不可达降级本地文件 */
+  async function restoreConsumedState(target: WeixinClient): Promise<void> {
+    try {
+      const hub = getHubWechatStateBridge()
+      // /use 竞态窗口：协调中心先把锁判给新实例，旧实例要等自己的心跳（≤3s）才让位并 flush 状态。
+      // 首次读到空状态时短暂重试等旧游标落地，避免新接管者从旧游标重收已处理消息。
+      // 重试仅在 hub 桥可用（状态有落地渠道）时进行；超时按无状态继续（宁重不丢）。
+      const maxAttempts = hub?.getWechatState || hub?.pushWechatState ? 6 : 1
+      let state: WechatPollState | null = null
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) await delay(500)
+        try {
+          state = hub?.getWechatState ? await hub.getWechatState() : null
+        } catch {
+          state = null
+        }
+        if (!state || !state.cursor) state = readLocalWechatState()
+        if (state && (state.cursor || Object.keys(state.messageIds ?? {}).length > 0)) break
+        state = null
+      }
+      if (!state) return
+      if (state.cursor) target.seedCursor(state.cursor)
+      const now = Date.now()
+      let count = 0
+      for (const [id, ts] of Object.entries(state.messageIds ?? {})) {
+        if (now - ts <= CONSUMED_TTL_MS) {
+          consumedMessageIds.set(id, ts)
+          count++
+        }
+      }
+      if (state.cursor || count > 0) {
+        log(`已恢复微信已消费状态: cursor=${state.cursor ? 'yes' : 'no'} messageIds=${count}`)
+      }
+    } catch {
+      // 恢复失败不影响启动（退化为旧行为：可能重复但不丢）
+    }
+  }
+
+  /** gateway 回调：每批拉取即标记已消费并上报；返回其他实例已消费过的重投 messageId（丢弃） */
+  function onBatchFetched(messageIds: string[], cursor: string): string[] {
+    pruneConsumed()
+    const now = Date.now()
+    const duplicates: string[] = []
+    for (const id of messageIds) {
+      if (!id) continue
+      if (isDuplicateConsumed(id)) duplicates.push(id)
+      consumedMessageIds.set(id, now)
+      selfFetchedIds.set(id, now)
+    }
+    reportConsumed(cursor)
+    if (duplicates.length > 0) {
+      log(`[DEDUP] 丢弃其他实例已消费的重投消息 ${duplicates.length} 条: ${duplicates.join(',')}`)
+    }
+    return duplicates
+  }
+
+  // --- WechatGateway：iLink 轮询 → InboundMessage → hub（协调命令）→ handleUserMessage（渠道处理） ---
+
+  const gateway = new WechatGateway({
+    getClient: () => client,
+    handleUserMessage: (m) => {
+      // 会话命令（/model /status 等需 pi 上下文）由渠道处理；
+      // 协调命令（/instances /use /msg 等）已由 hub 先消费，不会到这里
+      void handleGatewayMessage(m)
+    },
+    // 问卷等待中：宽松 use 匹配（数字→切换）让位于问卷答案
+    isAwaitingAnswer: (userId) => queue.pendingQuestionUserId === userId,
+    onStateChange: () => updateStatusBar(),
+    onError: (err) => {
+      if (err instanceof SessionExpiredError) {
+        notify('微信 Session 已过期，请执行 /wechat-login 重新登录', 'error')
+        void stopBridge({ releaseLock: true })
+        return
+      }
+      log(`轮询失败: ${formatError(err)}`)
+    },
+    heartbeat: () => {
+      // 轮询迭代中续约全局锁（双保险，主心跳是独立定时器）
+      lockHeartbeat()
+    },
+    onBatchFetched: (ids, cursor) => onBatchFetched(ids, cursor),
+  })
+
+  // --- 锁状态机 ---
+  // 客户端（有 coordUrl）：远程锁优先；协调中心不可达时降级本地锁（临时），
+  // 协调中心恢复后首个心跳重新仲裁：成功续约远程锁并清理本地锁，被占则让位。
+  // 协调中心模式（无 coordUrl）：本地锁唯一持有者。
+
+  /** 锁状态机：每 1s 运行一次。
+   *  - 未连接：尝试获取锁（协调中心不可达→降级本地；空闲→接管启动轮询）
+   *  - 已连接：续约锁（协调中心恢复→切远程清本地；被占→让位停止轮询）
+   *  独立于轮询循环，保证协调中心故障/恢复都能及时收敛。
+   */
+  // 协调中心连续不可达计数：连续 3 次（3s）才降级本地锁，避免 reload 抖动误判
+  let coordUnreachableCount = 0
+
+  function lockHeartbeat(): void {
+    const hub = getHubBridge()
+    const coordUrl = getCoordUrl()
+    const holderName = getLockHolderName()
+
+    if (coordUrl && hub?.requestRemoteLock) {
+      // 客户端模式：
+      //  - 协调中心可达：若本机已持有则续约（锁归本机 pid）；否则不抢（协调中心模式实例负责接管）
+      //  - 协调中心连续不可达：降级本地锁（唯一存活时接管）
+      void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then((res) => {
+        if (res.ok) {
+          coordUnreachableCount = 0
+          // 远程锁成功（获取或续约）：本机是持锁者，应启动/保持轮询
+          clearLocalDegradedLock()
+          if (!running) {
+            log(`已获取协调中心锁，启动微信轮询`)
+            startPolling()
+          }
+          return
+        }
+        if (res.unreachable) {
+          coordUnreachableCount++
+          // 协调中心连续不可达（≥3s，排除 reload 抖动）：降级本地锁
+          if (coordUnreachableCount >= 3) {
+            if (!running) {
+              if (hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')) {
+                log(`协调中心持续不可达，降级本地锁接管微信`)
+                startPolling()
+              }
+            } else {
+              hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')
+            }
+          }
+          return
+        }
+        // 协调中心可达但锁被他人持有（或空闲）：
+        coordUnreachableCount = 0
+        if (running) {
+          log(`全局锁已被其他实例接管，微信轮询让位`)
+          clearLocalDegradedLock()
+          void stopBridge({ releaseLock: false })
+        }
+      }).catch(() => {})
+      return
+    }
+    if (hub?.coordinatorTryLock) {
+      // 协调中心模式：本地锁唯一持有者
+      const ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
+      if (ok) {
+        if (!running) startPolling()
+      } else if (running) {
+        log(`全局锁已被其他实例接管，微信轮询让位`)
+        void stopBridge({ releaseLock: false })
+      }
+    }
+  }
+
+  /** 清理本地降级锁（仅当锁归本进程时）——协调中心恢复后避免双锁 */
+  function clearLocalDegradedLock(): void {
+    const hub = getHubBridge()
+    hub?.coordinatorReleaseLock?.(getLockHolderName(), 'wechat', process.pid)
+  }
+
+  // 独立心跳定时器：每 3s 运行锁状态机（不依赖 running，保证故障/恢复及时收敛）。
+  // 降频：与 GLOBAL_LOCK_TTL_MS(15s) 匹配（余量 >=3 次），减少磁盘 IO 与协调中心 HTTP 请求。
+  const heartbeatTimer = setInterval(() => lockHeartbeat(), 3000)
+
+  /** gateway 入站消息 → 渠道内部处理（从 rawMessage 恢复完整 IncomingMessage） */
+  async function handleGatewayMessage(m: {
+    id: string
+    userId: string
+    text?: string
+    attachments?: Array<{ kind: string; ref: unknown }>
+    ts: number
+    rawMessage?: unknown
+  }): Promise<void> {
+    // 会话替换/重载后旧闭包已失效：此时 ctx/pi 全为 stale，继续处理只会产生误导性报错
+    if (superseded) return
+    if (!client) return
+    const raw = m.rawMessage as
+      | (IncomingMessage & { raw?: unknown })
+      | undefined
+    if (raw) {
+      // hub 已消费协调命令；此处直接走渠道完整处理（含图片/文件/问卷）
+      await handleIncomingMessage(raw, client)
+      return
+    }
+    // 无原始消息（理论上不发生）：兜底构造文本消息
+    const msg: IncomingMessage = {
+      messageId: m.id,
+      userId: m.userId,
+      text: m.text ?? '',
+      type: 'text',
+      imageUrls: [],
+      timestamp: new Date(m.ts),
+      raw: {} as IncomingMessage['raw'],
+      contextToken: '',
+    }
+    await handleIncomingMessage(msg, client)
   }
 
   // --- 远程命令依赖 ---
@@ -345,6 +741,126 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   // --- TUI 命令注册 ---
 
+  const startPolling = async (): Promise<void> => {
+    try {
+      if (running || !client) return
+      await preflightBridge()
+      running = true
+      agentIdle = true
+      pollAbort = new AbortController()
+      // 恢复已消费状态（游标 + messageId 集）必须在首次轮询前完成，否则新接管者会重收旧实例已推送的消息
+      await restoreConsumedState(client)
+      prepareBridge()
+      await client.notifyStart().catch((error) => {
+        log(`notifyStart 失败（不阻断启动）: ${formatError(error)}`)
+      })
+      notify('微信桥接已启动 📱', 'info')
+      updateStatusBar()
+      void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
+      // 注意：不在这里通知微信用户。接管通知仅在明确的接管事件（onTakeoverRequest）触发，
+      // 避免降级接管/autoStart/heartbeat 多路径重复通知。
+    } catch (err) {
+      // 防御：任何同步异常都不得让异步调用链变成 unhandledRejection（会导致 Node 进程崩溃）
+      running = false
+      log(`startPolling 异常: ${formatError(err)}`)
+    }
+  }
+
+  /**
+   * 接管/启动成功后通知最后活跃的微信用户：告知已由本实例接管。
+   * 用户感知不到实例切换，需主动告知。
+   * 注：不再附「最后一条对话」——userMsg/aiMsg 独立写入会拼出错位的假对话，误导用户。
+   */
+  // 接管通知防抖：同一实例 5s 内只通知一次（避免 heartbeat/接管分支竞态重复）
+  let lastTakeoverNotify = 0
+  async function notifyWechatTakeover(): Promise<void> {
+    try {
+      if (!client || !running) return
+      const now = Date.now()
+      if (now - lastTakeoverNotify < 5000) return
+      lastTakeoverNotify = now
+      const userId = client.lastActiveUserId ?? queue.lastWechatUser?.userId
+      if (!userId) return
+      const instanceLabel = currentInstanceName || 'local'
+      await client.sendText(userId, `🔁 微信已由实例 ${instanceLabel} 接管`)
+      log(`已通知微信用户接管切换: ${instanceLabel}`)
+    } catch (err) {
+      log(`接管通知失败: ${formatError(err)}`)
+    }
+  }
+
+  /**
+   * 发送会话替换的确认消息。
+   * /new /prev /next /goto 的「⏳ 进行中」由旧实例发，成功确认只能由新实例发——
+   * 旧实例的 client 已在 session_shutdown 里 dispose 了。
+   * 标志消费即清除（take*），因此只会发一次。
+   */
+  async function sendPendingSessionConfirmations(): Promise<void> {
+    const newSession = takeNewSessionConfirm()
+    if (newSession) {
+      await client?.sendText(newSession.userId, NEW_SESSION_CONFIRM_REPLY).catch(() => {})
+      log(`已发送新会话确认: ${newSession.userId}`)
+    }
+    const switched = takeSwitchConfirm()
+    if (switched) {
+      await client?.sendText(switched.userId, switched.message).catch(() => {})
+      log(`已发送会话切换确认: ${switched.message}`)
+    }
+  }
+
+  /** 持久化最后一条微信文本消息（接管通知用，跨实例共享） */
+  interface LastWechatMsg { userId: string; userMsg: string; aiMsg: string; ts: number }
+
+  /** hub 桥的 lastMsg 读写（协调中心模式本地/客户端模式远程，跨实例共享） */
+  function getHubLastMsgBridge(): {
+    getLastMsg?: () => Promise<LastWechatMsg | null>
+    setLastMsg?: (data: Partial<LastWechatMsg>) => Promise<void>
+  } | null {
+    return ((globalThis as Record<string, unknown>).__PI_HUB__ ?? null) as ReturnType<typeof getHubLastMsgBridge>
+  }
+
+  /** 持久化最后一条微信用户消息（接管通知用，跨实例共享） */
+  function persistLastWechatMessage(userId: string, text: string): void {
+    const hub = getHubLastMsgBridge()
+    if (hub?.setLastMsg) {
+      void hub.setLastMsg({ userId, userMsg: text.slice(0, 200) })
+      return
+    }
+    // 无 hub（降级）：本地写
+    try {
+      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
+      const prev = readLocalLastWechatMsg()
+      fs.writeFileSync(file, JSON.stringify({ userId, userMsg: text.slice(0, 200), aiMsg: prev?.aiMsg ?? '', ts: Date.now() }), { mode: 0o600 })
+    } catch {
+      // ignore
+    }
+  }
+
+  /** 持久化最后一条 AI 回复（接管通知带完整对话上下文） */
+  function persistLastWechatAiReply(userId: string, text: string): void {
+    const hub = getHubLastMsgBridge()
+    if (hub?.setLastMsg) {
+      void hub.setLastMsg({ userId, aiMsg: text.slice(0, 500) })
+      return
+    }
+    try {
+      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
+      const prev = readLocalLastWechatMsg()
+      fs.writeFileSync(file, JSON.stringify({ userId, userMsg: prev?.userMsg ?? '', aiMsg: text.slice(0, 500), ts: Date.now() }), { mode: 0o600 })
+    } catch {
+      // ignore
+    }
+  }
+
+  function readLocalLastWechatMsg(): LastWechatMsg | null {
+    try {
+      const file = path.join(os.homedir(), '.pi', 'agent', 'wechat-assistant', 'last-wechat-msg.json')
+      return JSON.parse(fs.readFileSync(file, 'utf8')) as LastWechatMsg
+    } catch {
+      return null
+    }
+  }
+
   const commandDeps: CommandDeps = {
     pi,
     prepareBridge,
@@ -355,12 +871,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     loadClient,
     isRunning: () => running,
     setRunning: (v) => { running = v; if (v) agentIdle = true },
-    requestHandoff,
     setPollAbort: (c) => { pollAbort = c },
     queue,
     lock,
     stopBridge,
-    pollMessages,
+    pollMessages: startPolling,
     latestCtx: () => latestCtx,
     setLatestCtx: (ctx) => { latestCtx = ctx },
     updateStatusBar,
@@ -369,6 +884,108 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   }
 
   registerCommands(pi, commandDeps)
+
+  // --- 内部命令：微信 /new 开启新会话 ---
+  // newSession 仅在扩展命令上下文（ExtensionCommandContext）可用，
+  // 微信远程命令通过 sendUserMessage(expandPromptTemplates) 触发这里。
+
+  pi.registerCommand('__wechat_new_session', {
+    description: '通过微信开启新会话（内部命令，由微信远程命令 /new 触发）',
+    handler: async (_args, ctx) => {
+      // 待确认的 userId 在替换前取出：替换成功后 latestCtx/标志都会变
+      const pending = peekNewSessionConfirm()
+      try {
+        const parentSession = ctx.sessionManager.getSessionFile() ?? undefined
+        const result = await ctx.newSession({ parentSession })
+        if (result.cancelled) {
+          clearNewSessionConfirm()
+          if (pending) void client?.sendText(pending.userId, '❌ 开启新会话已被取消').catch(() => {})
+        }
+        // 成功：保留标志，交给新实例 session_start 消费并发确认
+      } catch (err) {
+        // 替换失败：必须清掉标志，否则会残留到下一次 session_start 造成误导性确认
+        clearNewSessionConfirm()
+        if (pending) void client?.sendText(pending.userId, `❌ 开启新会话失败: ${formatError(err)}`).catch(() => {})
+        notify(`__wechat_new_session 失败: ${formatError(err)}`, 'error')
+      }
+    },
+  })
+
+  // --- 内部命令：微信 /reload 重载扩展 ---
+
+  pi.registerCommand('__wechat_reload', {
+    description: '通过微信重载扩展（内部命令，由微信远程命令 /reload 触发）',
+    handler: async (_args, ctx) => {
+      await ctx.reload()
+    },
+  })
+
+  // --- 内部命令：微信 /prev /next /goto 切换会话 ---
+
+  const formatSessionTime = (d: Date) => {
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    return `${hh}:${mm}`
+  }
+
+  pi.registerCommand('__wechat_switch_session', {
+    description: '通过微信切换会话（内部命令，prev/next/goto 由微信远程命令触发）',
+    handler: async (args, ctx) => {
+      const [modeArg, ...restArgs] = (args || 'prev').trim().split(/\s+/)
+      const mode = modeArg as 'prev' | 'next' | 'goto'
+      const pendingUserId = peekSwitchConfirm()?.userId ?? null
+      const notify = (msg: string) => {
+        if (!pendingUserId) return
+        clearSwitchConfirm()
+        void client?.sendText(pendingUserId, msg).catch(() => {})
+      }
+      try {
+        const current = ctx.sessionManager.getSessionFile()
+        if (!current) {
+          notify('❌ 未找到当前会话')
+          return
+        }
+        const all = (await SessionManager.list(ctx.cwd)).sort((a, b) => b.modified.getTime() - a.modified.getTime())
+        let target: { path: string; name?: string; modified: Date }
+        let dir: string
+        if (mode === 'goto') {
+          const n = parseInt(restArgs[0] ?? '', 10)
+          if (!Number.isFinite(n) || n < 1 || n > all.length) {
+            notify(Number.isFinite(n) && n >= 1 ? `❌ 只有 ${all.length} 个会话` : '❌ 无效的序号')
+            return
+          }
+          if (all[n - 1].path === current) {
+            notify(`✅ 已经在第 ${n} 个会话了`)
+            return
+          }
+          target = all[n - 1]
+          dir = `第 ${n} 个`
+        } else {
+          const idx = all.findIndex((s) => s.path === current)
+          if (idx === -1) {
+            notify('❌ 未找到当前会话')
+            return
+          }
+          const targetIdx = mode === 'prev' ? idx + 1 : idx - 1
+          if (targetIdx < 0 || targetIdx >= all.length) {
+            notify(mode === 'prev' ? '❌ 已经没有更早的会话了' : '❌ 已经在最新的会话了')
+            return
+          }
+          target = all[targetIdx]
+          dir = mode === 'prev' ? '上一次' : '下一次'
+        }
+        if (peekSwitchConfirm()) {
+          const label = target.name ?? formatSessionTime(target.modified)
+          setSwitchConfirmMessage(`✅ 已切到${dir}的会话（${label}）`)
+        }
+        const result = await ctx.switchSession(target.path, { withSession: async () => {} })
+        // 成功：标志保留，交给新实例 session_start 发确认
+        if (result.cancelled) notify('❌ 切换会话已被取消')
+      } catch (err) {
+        notify(`❌ 切换会话失败: ${formatError(err)}`)
+      }
+    },
+  })
 
   // ============================================================================
   // AI 工具注册
@@ -380,19 +997,107 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   }
 
   // ============================================================================
+  // 微信问卷桥接 API（供 ask-user-question-rpc 等扩展在微信 turn 中委托提问）
+  // ============================================================================
+
+  const wechatQuestionBridge: WechatQuestionBridge = {
+    isWechatTurnActive: () => running && !!client && turn.wechatConversationActive,
+    getActiveUserId: () => turn.targetUser,
+    askQuestion: async (opts) => {
+      if (!running || !client) return null
+      const userId = opts.userId ?? turn.targetUser ?? queue.lastWechatUser?.userId
+      if (!userId) return null
+      const answer = await queue.askQuestion({ ...opts, userId })
+      if (!answer) return null
+      switch (answer.kind) {
+        case 'option':
+          return { kind: 'option', answer: answer.label }
+        case 'multi':
+          return { kind: 'multi', answer: null, selected: answer.labels }
+        case 'custom':
+          return { kind: 'custom', answer: answer.text }
+        default:
+          return { kind: 'chat', answer: null }
+      }
+    },
+  }
+  ;(globalThis as unknown as { __PI_WECHAT_BRIDGE__?: WechatQuestionBridge }).__PI_WECHAT_BRIDGE__ = wechatQuestionBridge
+
+  // ============================================================================
   // 事件处理
   // ============================================================================
 
   pi.on('session_start', async (_event, ctx) => {
     latestCtx = ctx
+    // 实例名与协调中心保持一致（hub 可能用 config.instanceName 覆盖 cwd 名）
+    currentInstanceName = getHubBridge()?.getInstanceName?.() || path.basename(process.env.PWD || ctx.cwd) || 'local'
     wechatFilesDir = path.join(ctx.cwd, WECHAT_FILES_SUBDIR)
     await loadClient()
     updateStatusBar()
+    // 会话替换（/new /prev /next /goto）的确认消息必须在这里发：旧实例的 client
+    // 已在 session_shutdown 里 dispose，只能由新实例消费标志后发送
+    void sendPendingSessionConfirmations()
+
+    // 注册到 pi-hub（协调核心）：渠道只负责协议收发，接管/锁/消息路由由 hub 仲裁
+    const hub = (globalThis as Record<string, unknown>).__PI_HUB__ as
+      | { registerGateway?: (gw: unknown) => void; onTakeoverRequest?: (cb: (req: { targetName?: string; capability?: string }) => void) => void }
+      | undefined
+    if (hub?.registerGateway) {
+      hub.registerGateway(gateway)
+    }
+    // 接管让位 + 自动接管：
+    //  - target 是其他实例 → 本机让位（停止轮询）
+    //  - target 是本机 / local / 空 → 自动接管信号（锁空闲或协调中心不可达），尝试启动轮询
+    hub?.onTakeoverRequest?.((req) => {
+      const cap = req.capability ?? 'wechat'
+      if (cap !== 'wechat') return
+      const target = req.targetName
+      if (target && target !== currentInstanceName && target !== 'local') {
+        if (running) {
+          log(`收到接管请求 (${target})，微信轮询让位`)
+          void stopBridge({ releaseLock: false })
+        }
+        return
+      }
+      // 自动接管信号：本机应尝试获取锁并启动轮询
+      if (running) return
+      void (async () => {
+        const lockResult = await lock()
+        if (!lockResult.success) {
+          log(`自动接管尝试失败: ${lockResult.message}`)
+          return
+        }
+        running = true
+        agentIdle = true
+        pollAbort = new AbortController()
+        // /use 接管路径与 startPolling 一致：必须先恢复游标+已消费集再轮询，
+        // 否则新接管者从空游标把旧实例已处理的消息全部重收一遍
+        if (client) await restoreConsumedState(client)
+        notify(`微信桥接已接管 📱`, 'info')
+        updateStatusBar()
+        void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
+        // 接管成功后通知微信用户
+        void notifyWechatTakeover()
+      })()
+    })
 
     const config = await loadConfig()
-    // TUI auto-start keeps the manual behaviour, including the takeover prompt;
-    // headless modes show the plain lock diagnostic without prompting.
-    if (config.autoStart && client) await startBridge('', ctx, commandDeps, ctx.hasUI)
+    if (config.autoStart && client) {
+      const lockResult = await lock()
+      if (lockResult.success) {
+        running = true
+        agentIdle = true
+        pollAbort = new AbortController()
+        notify('微信桥接已自动启动 📱', 'info')
+        updateStatusBar()
+        void gateway.connect().catch(err => {
+          log(`gateway.connect 异常退出: ${formatError(err)}`)
+        })
+        // 首次启动不通知微信用户（非接管切换）
+      } else {
+        log(`自动启动失败: ${lockResult.message}`)
+      }
+    }
   })
 
   // Transient model context only: never persist stale stop notices in the session.
@@ -409,73 +1114,35 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (messages.length !== event.messages.length || (toolsRegistered && !running)) return { messages }
   })
 
-  // Input may be queued: do not change the running reply's source here.
-  pi.on('input', async (event, ctx) => {
+  // 用户在 TUI 主动输入非命令内容 → 打断微信对话活跃状态
+  pi.on('input', (event, ctx) => {
     latestCtx = ctx
-    if (!running) return
-    const request = queue.observeInput(event.text, event.images, event.source)
-    if (!request || !ctx.isIdle()) return
-    const requestClient = client
-    const requestSignal = pollAbort?.signal
-    // sendUserMessage() returns void and Pi reports pre-run rejections only to its UI.
-    // Check public model/auth state for our idle inputs; do not inspect credentials.
-    let problem: string | undefined
-    const model = ctx.model
-    if (!model) problem = '尚未选择模型，请在 Pi 中选择模型后重新发送。'
-    else if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
-      if (!hasSettledEvents(ctx)) problem = '当前模型未配置可用的认证信息，请在 Pi 中检查模型配置或重新登录。'
-      else {
-        // New hosts can resolve auth lazily; a false synchronous snapshot is not a failure.
-        try {
-          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model)
-          if (!auth.ok) problem = summarizeModelError(auth.error)
-        } catch (error) { problem = summarizeModelError(formatError(error)) }
-      }
-    }
-    if (!running || !queue.hasSubmittedRequest(request)) return { action: 'handled' as const }
-    if (!problem || ctx.model !== model) return
-    queue.discardSubmittedRequest(request)
-    await requestClient?.stopTyping(request.userId).catch(() => {})
-    try {
-      if (running && !requestSignal?.aborted && client === requestClient) {
-        await requestClient?.sendText(request.userId, `⚠️ 无法开始模型请求：${problem}`)
-      }
-    }
-    catch (error) { log(`模型启动错误通知发送失败: ${formatError(error)}`) }
-    updateStatusBar()
-    setImmediate(() => void queue.drain())
-    return { action: 'handled' as const }
+    if (event.source === 'extension') return
+    const text = event.text?.trim()
+    if (!text || text.startsWith('/')) return
+    turn.wechatConversationActive = false
   })
 
+  // TUI 用户输入镜像到微信（upstream：双向同步含图片数；微信来源消息跳过）
   pi.on('message_start', async (event, ctx) => {
     latestCtx = ctx
     if (event.message.role !== 'user') return
-    const previous = queue.activeRequest
-    const request = running ? queue.consumeSubmittedRequest(event.message.content) : null
-    modelFailure.reset()
-    queue.activeRequest = request
-    if (previous && previous !== request) void client?.stopTyping(previous.userId).catch(() => {})
-    turn.wechatConversationActive = request !== null
-    turn.targetUser = request?.userId ?? (running ? client?.userId ?? null : null)
-    updateStatusBar()
-    setImmediate(() => void queue.drain())
-    if (!request && running && client && getConfigCache().bidirectionalSync === true) {
-      const content = event.message.content
-      const text = extractTextFromMessageContent(content)
-      const imageCount = Array.isArray(content) ? content.filter(part => part.type === 'image').length : 0
-      const preview = text
-        ? text + (imageCount ? `\n[附带 ${imageCount} 张图片]` : '')
-        : imageCount ? `发送了 ${imageCount} 张图片` : null
-      if (preview) {
-        const signal = pollAbort?.signal
-        try {
-          for (const chunk of splitAndFilterMarkdown(`[电脑端] ${preview}`)) {
-            if (!running || signal?.aborted) break
-            await client.sendText(client.userId, chunk)
-          }
-        } catch (error) { log(`TUI 输入同步失败: ${formatError(error)}`) }
+    if (queue.pendingInjection || turn.wechatConversationActive) return
+    if (!running || !client || getConfigCache().bidirectionalSync === false) return
+    const content = event.message.content
+    const text = extractTextFromMessageContent(content)
+    const imageCount = Array.isArray(content) ? content.filter(part => part.type === 'image').length : 0
+    const preview = text
+      ? text + (imageCount ? `\n[附带 ${imageCount} 张图片]` : '')
+      : imageCount ? `发送了 ${imageCount} 张图片` : null
+    if (!preview) return
+    const signal = pollAbort?.signal
+    try {
+      for (const chunk of splitAndFilterMarkdown(`[电脑端] ${preview}`)) {
+        if (!running || signal?.aborted) break
+        await client.sendText(client.userId, chunk)
       }
-    }
+    } catch (error) { log(`TUI 输入同步失败: ${formatError(error)}`) }
   })
 
   // Hold submissions during preparation on older Pi. Append the same conditional
@@ -494,10 +1161,19 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       if (remaining.length !== active.length) pi.setActiveTools(remaining)
     }
     const source = getConfigCache().messageSourceTag
-    if (!running || source?.enabled === false || wechatPrompt.rules === null) return
-    return {
-      systemPrompt: appendWechatSystemRules(event.systemPrompt, wechatPrompt.rules, source?.wechatTag?.trim() || WECHAT_SOURCE_TAG),
+    // upstream 条件规则段：内容自带来源标识自限，TUI 回合不生效，恒定追加
+    let systemPrompt = event.systemPrompt
+    if (wechatPrompt.rules !== null) {
+      systemPrompt = appendWechatSystemRules(systemPrompt, wechatPrompt.rules, source?.wechatTag?.trim() || WECHAT_SOURCE_TAG)
     }
+    // 本地 pendingInjection 注入：微信回合追加微信风格指令
+    const request = queue.pendingInjection ?? queue.activeRequest
+    log(`[BEFORE-AGENT] turnSeq=${turn.seq} pendingInjection=${!!queue.pendingInjection} activeRequest=${!!queue.activeRequest} willInject=${!!request}`)
+    if (request) {
+      systemPrompt = buildSystemPrompt(systemPrompt)
+      log(`[BEFORE-AGENT-INJECT] injecting wechat system prompt`)
+    }
+    return { systemPrompt }
   })
 
   // Block known TUI-only question tools for a confirmed WeChat request. Modern
@@ -525,6 +1201,17 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     turn.sentCount = 0
     turn.messages = null
     turn.ended = false
+
+    if (queue.pendingInjection) {
+      queue.activeRequest = queue.pendingInjection
+      turn.wechatConversationActive = true
+      turn.targetUser = queue.activeRequest.userId
+      log(`[AGENT-START] turn#${turn.seq} source=WECHAT userId=${turn.targetUser} pendingInjection consumed`)
+      queue.pendingInjection = null
+    } else {
+      turn.targetUser = queue.lastWechatUser?.userId ?? null
+      log(`[AGENT-START] turn#${turn.seq} source=TUI targetUser=${turn.targetUser ?? 'null'}`)
+    }
 
     // Retry loops have no new user message; retain its source and question guard.
     modelFailure.startAttempt()
@@ -566,6 +1253,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
         await client.sendText(targetUserId, chunks[i])
       }
       turn.sentCount++
+      // 记录最后一条 AI 回复（接管通知带完整上下文）
+      persistLastWechatAiReply(targetUserId, text)
       log(`[MSG-END-DONE] incrementally sent, totalSent=${turn.sentCount}`)
     } catch (err) {
       log(`[MSG-END-ERROR] ${formatError(err)}`)
@@ -588,6 +1277,12 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
     if (queue.activeRequest) {
       await client?.stopTyping(queue.activeRequest.userId).catch(() => {})
+    }
+
+    // 兜底：agent 结束时仍有未完成的问题（异常中断路径）→ 取消等待
+    if (queue.pendingQuestion) {
+      log(`[AGENT-END] cancelling leftover pending question`)
+      queue.cancelPendingQuestion()
     }
     updateStatusBar()
 
@@ -622,9 +1317,17 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   })
 
   // 会话关闭 → 清理 + 落盘 context tokens
-  pi.on('session_shutdown', async (_event, ctx) => {
-    latestCtx = ctx
-    await stopBridge({ releaseLock: true })
+  pi.on('session_shutdown', async (_event, _ctx) => {
+    // 注意：不要把 ctx 存进 latestCtx —— 它马上就随着 dispose/reload 变 stale，
+    // 清空反而能让在途 handler 尽早回「正在切换」而不是抛内部 stale 错误。
+    superseded = true
+    latestCtx = null
+    clearInterval(heartbeatTimer)
+    // reload/new 等会话替换场景：不释放全局锁（避免重载窗口内他机抢锁切换持有者），
+    // 重载后同 pid 续约继续持有；仅真正退出（quit）时释放，让 TTL 自然让位
+    const reason = (_event as { reason?: string } | undefined)?.reason
+    const isQuit = reason === 'quit' || reason === undefined
+    await stopBridge({ releaseLock: isQuit })
     await disposeClient()
   })
 

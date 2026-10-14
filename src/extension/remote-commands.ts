@@ -4,9 +4,17 @@
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
 import { debugLog } from '../shared/logger.js'
-import { formatError } from '../shared/utils.js'
+import { formatError, isCtxUsable, isStaleExtensionError } from '../shared/utils.js'
 import { getImageMaxBytes, getImageBatchWaitMs } from '../bridge/queue.js'
 import { WeixinClient } from '../wechat/client.js'
+// @ts-ignore — @earendil-works is the current package, but the older package still carries TS declarations used for compatibility here
+import { SessionManager } from '@mariozechner/pi-coding-agent'
+import {
+  clearNewSessionConfirm,
+  clearSwitchConfirm,
+  markNewSessionConfirm,
+  markSwitchConfirm,
+} from '../session-confirm.js'
 
 type Ctx = ExtensionContext | ExtensionCommandContext
 
@@ -21,10 +29,149 @@ export interface RemoteCommandDeps {
 
 type RemoteCommandFn = (args: string, userId: string, client: WeixinClient, deps: RemoteCommandDeps) => Promise<string | null>
 
+/** 会话替换/重载进行中时不再执行命令，统一回这句友好提示（原始错误只写 debug 日志） */
+const CTX_UNAVAILABLE_REPLY = '⚠️ 会话正在切换或扩展重载中，请稍后重试'
+
+/**
+ * 取一个仍可用的 ctx：null 或已被会话替换/重载回收（getter 会 throw）时返回 null。
+ * ctx 与 pi runtime 同属一个 runner，ctx 失效时 pi 调用也会 throw，故统一用它做前置校验。
+ */
+function getUsableCtx(deps: RemoteCommandDeps): Ctx | null {
+  const ctx = deps.getCtx()
+  return isCtxUsable(ctx) ? ctx : null
+}
+
+/**
+ * 投递内部命令（/__wechat_*）。
+ * 旧 pi API 在会话替换/重载后会同步 throw（assertActive），这里降级为 false，
+ * 由调用方回友好提示，避免异常冒泡到句柄 catch 把 pi 内部文案发给用户。
+ */
+async function sendInternalCommand(deps: RemoteCommandDeps, text: string): Promise<boolean> {
+  try {
+    await deps.pi.sendUserMessage(text, {
+      deliverAs: 'steer',
+      expandPromptTemplates: true,
+    } as Parameters<typeof deps.pi.sendUserMessage>[1] & { expandPromptTemplates: boolean })
+    return true
+  } catch (err) {
+    debugLog(`内部命令投递失败 ${text}: ${formatError(err)}`)
+    return false
+  }
+}
+
+/** 触发扩展内部命令 /__wechat_switch_session，实际切换由扩展命令上下文完成 */
+async function triggerSessionSwitch(
+  deps: RemoteCommandDeps,
+  userId: string,
+  mode: 'prev' | 'next' | 'goto',
+  waitingMsg: string,
+  confirmMsg: string,
+): Promise<string | null> {
+  if (!getUsableCtx(deps)) return CTX_UNAVAILABLE_REPLY
+  const client = deps.client()
+  if (!client) return '❌ 微信客户端尚未就绪'
+  await client.sendText(userId, waitingMsg).catch(() => {})
+  markSwitchConfirm(userId, confirmMsg)
+  // 投递失败（会话替换/重载窗口）→ 清理确认标志，避免残留导致确认消息永远等不到
+  if (!(await sendInternalCommand(deps, `/__wechat_switch_session ${mode}`))) {
+    clearSwitchConfirm()
+    return CTX_UNAVAILABLE_REPLY
+  }
+  return null
+}
+
 const commands: Record<string, RemoteCommandFn> = {
+  async new(_args, userId, client, deps) {
+    if (!getUsableCtx(deps)) return CTX_UNAVAILABLE_REPLY
+    await client.sendText(userId, '⏳ 正在开启新会话...').catch(() => {})
+    // newSession 只能在扩展命令上下文里调用，通过内部命令触发；挂上确认标志，
+    // 成功后的确认消息由新会话实例（session_start）发送
+    markNewSessionConfirm(userId)
+    if (!(await sendInternalCommand(deps, '/__wechat_new_session'))) {
+      clearNewSessionConfirm()
+      return CTX_UNAVAILABLE_REPLY
+    }
+    return null
+  },
+
+  async prev(_args, userId, _client, deps) {
+    return triggerSessionSwitch(deps, userId, 'prev', '⏳ 正在切到上一次的会话...', '✅ 已切到上一次的会话')
+  },
+
+  async next(_args, userId, _client, deps) {
+    return triggerSessionSwitch(deps, userId, 'next', '⏳ 正在切到下一次的会话...', '✅ 已切到下一次的会话')
+  },
+
+  async reloadAll(_args, userId, client, deps) {
+    if (!getUsableCtx(deps)) return CTX_UNAVAILABLE_REPLY
+    await client.sendText(userId, '⏳ 正在广播重载所有实例...').catch(() => {})
+    // 广播：通过 hub 桥（本机实例广播文件 + 客户端 POST envelope 跨机器分发）
+    const hub = (globalThis as Record<string, unknown>).__PI_HUB__ as
+      | { broadcastReload?: () => void }
+      | undefined
+    hub?.broadcastReload?.()
+    if (!(await sendInternalCommand(deps, '/__wechat_reload'))) return CTX_UNAVAILABLE_REPLY
+    return null
+  },
+
+  async reload(_args, userId, client, deps) {
+    if (!getUsableCtx(deps)) return CTX_UNAVAILABLE_REPLY
+    await client.sendText(userId, '⏳ 正在重载本实例扩展...').catch(() => {})
+    // 重载扩展：通过内部命令 __wechat_reload（handler 调 ctx.reload()）
+    if (!(await sendInternalCommand(deps, '/__wechat_reload'))) return CTX_UNAVAILABLE_REPLY
+    return null
+  },
+
+  async sessions(_args, _userId, _client, deps) {
+    const ctx = getUsableCtx(deps)
+    if (!ctx) return CTX_UNAVAILABLE_REPLY
+    // 先取出值再 await：await 期间会话可能被替换，之后读 ctx.cwd 会抛 stale
+    const cwd = ctx.cwd
+    const current = ctx.sessionManager.getSessionFile()
+    const all = (await SessionManager.list(cwd)).sort((a, b) => b.modified.getTime() - a.modified.getTime())
+    if (all.length === 0) return '还没有会话'
+    const fmt = (d: Date) => {
+      const hh = String(d.getHours()).padStart(2, '0')
+      const mm = String(d.getMinutes()).padStart(2, '0')
+      return `${hh}:${mm}`
+    }
+    const lines = ['最近的会话:']
+    const shown = all.slice(0, 10)
+    for (const [i, s] of shown.entries()) {
+      const isCurrent = s.path === current
+      const clean = (t: string) => t.replace(/^\[语音转文字\]\s*/, '').replace(/\s+/g, ' ').trim()
+      const topic = clean(s.firstMessage || '')
+      const truncated = topic.length > 18 ? `${topic.slice(0, 18)}…` : topic
+      const label = s.name
+        ? `${s.name}（${fmt(s.modified)}）`
+        : truncated
+          ? `${fmt(s.modified)} ${truncated}`
+          : fmt(s.modified)
+      lines.push(`${i + 1}. ${label}${isCurrent ? '（当前）' : ''}`)
+    }
+    if (all.length > shown.length) lines.push(`  ...还有 ${all.length - shown.length} 个`)
+    lines.push('', '说「上一次的会话」/「下一次的会话」或「切到会话 序号」切换')
+    return lines.join('\n')
+  },
+
+  async goto(args, userId, _client, deps) {
+    const n = parseInt(args, 10)
+    if (!Number.isFinite(n) || n < 1) return '❌ 请输入序号，如「切到 2」'
+    const ctx = getUsableCtx(deps)
+    if (!ctx) return CTX_UNAVAILABLE_REPLY
+    // 先取出值再 await（理由同 sessions）
+    const cwd = ctx.cwd
+    const current = ctx.sessionManager.getSessionFile()
+    const all = (await SessionManager.list(cwd)).sort((a, b) => b.modified.getTime() - a.modified.getTime())
+    if (n > all.length) return `❌ 只有 ${all.length} 个会话`
+    const target = all[n - 1]
+    if (target.path === current) return `✅ 已经在第 ${n} 个会话了`
+    return triggerSessionSwitch(deps, userId, 'goto', `⏳ 正在切到第 ${n} 个会话...`, `✅ 已切到第 ${n} 个会话`)
+  },
+
   async model(args, userId, client, deps) {
-    const ctx = deps.getCtx()
-    if (!ctx) return '❌ 会话上下文尚未就绪，请稍后再试'
+    const ctx = getUsableCtx(deps)
+    if (!ctx) return CTX_UNAVAILABLE_REPLY
     const registry = ctx.modelRegistry
     if (!args) {
       const models = registry.getAvailable()
@@ -86,8 +233,8 @@ const commands: Record<string, RemoteCommandFn> = {
   },
 
   async compact(_args, userId, client, deps) {
-    const ctx = deps.getCtx()
-    if (!ctx) return '❌ 会话上下文尚未就绪'
+    const ctx = getUsableCtx(deps)
+    if (!ctx) return CTX_UNAVAILABLE_REPLY
     ctx.compact({
       onComplete: () => { void client.sendText(userId, '✅ 上下文压缩完成') },
       onError: (error) => { void client.sendText(userId, `❌ 压缩失败: ${error.message}`) },
@@ -96,16 +243,16 @@ const commands: Record<string, RemoteCommandFn> = {
   },
 
   async stop(_args, _userId, _client, deps) {
-    const ctx = deps.getCtx()
-    if (!ctx) return '❌ 会话上下文尚未就绪'
+    const ctx = getUsableCtx(deps)
+    if (!ctx) return CTX_UNAVAILABLE_REPLY
     if (ctx.isIdle()) return '当前没有在执行任务'
     ctx.abort()
     return '✅ 已发送停止信号'
   },
 
   async status(_args, _userId, _client, deps) {
-    const ctx = deps.getCtx()
-    if (!ctx) return '❌ 会话上下文尚未就绪'
+    const ctx = getUsableCtx(deps)
+    if (!ctx) return CTX_UNAVAILABLE_REPLY
     const lines: string[] = []
     if (ctx.model) lines.push(`模型: ${ctx.model.provider}/${ctx.model.id}`)
     lines.push(`Thinking: ${deps.pi.getThinkingLevel()}`)
@@ -181,8 +328,8 @@ const commands: Record<string, RemoteCommandFn> = {
   },
 
   async session(_args, _userId, _client, deps) {
-    const ctx = deps.getCtx()
-    if (!ctx) return '❌ 会话上下文尚未就绪'
+    const ctx = getUsableCtx(deps)
+    if (!ctx) return CTX_UNAVAILABLE_REPLY
     const sm = ctx.sessionManager
     const lines: string[] = []
     const file = sm.getSessionFile()
@@ -250,6 +397,13 @@ const commands: Record<string, RemoteCommandFn> = {
       '📋 微信远程命令:',
       '',
       '/status          查看当前状态',
+      '/new             开启新会话',
+      '/prev            切到上一次的会话（更早）',
+      '/next            切到下一次的会话（更新）',
+      '/sessions        列出最近的会话（带序号）',
+      '/goto <序号>      按序号切换到指定会话',
+      '/reload      广播重载所有实例',
+      '/reload           重载本实例扩展',
       '/stop            停止当前生成',
       '/model           查看 / 切换模型',
       '/name <名称>     设置会话名称',
@@ -257,7 +411,13 @@ const commands: Record<string, RemoteCommandFn> = {
       '/config          查看图片相关配置',
       '/help            显示帮助',
       '',
-      '高级: /thinking, /compact；/tools 默认禁用（电脑端执行 /wechat remotetools on 开启）',
+      '协调命令（实例间）:',
+      '/instances      查看所有实例',
+      '/use <实例>     切换微信接管',
+      '/cmd <实例> <指令> 向实例发指令',
+      '/start [实例] 在 tmux 中启动 pi',
+      '',
+      '高级: /thinking, /compact, /reload；/tools 默认禁用（电脑端执行 /wechat remotetools on 开启）',
       '直接发文字、语音、图片、文件 = 正常对话',
     ].join('\n')
   },
@@ -271,8 +431,10 @@ export async function handleRemoteCommand(
 ): Promise<boolean> {
   const trimmed = text.trim()
   if (!trimmed.startsWith('/')) return false
-  const [cmd, ...rest] = trimmed.slice(1).split(/\s+/)
+  const [cmdRaw, ...rest] = trimmed.slice(1).split(/\s+/)
   const args = rest.join(' ')
+  // 连字符命令转驼峰：/reloadall → reloadAll（与命令表 key 对齐）
+  const cmd = cmdRaw.replace(/-([a-z])/g, (_, c) => c.toUpperCase())
   const handler = commands[cmd]
   if (!handler) return false
   try {
@@ -280,7 +442,12 @@ export async function handleRemoteCommand(
     if (reply !== null) await client.sendText(userId, reply)
   } catch (err) {
     debugLog(`远程命令 /${cmd} 执行失败: ${formatError(err)}`)
-    await client.sendText(userId, `❌ 命令执行失败: ${formatError(err)}`).catch(() => {})
+    // 会话替换/重载会让在途 handler 手里的 ctx/pi 失效：pi 内部文案对用户无意义，
+    // 降级为友好提示（真实错误只进 debug 日志）
+    const reply = isStaleExtensionError(err)
+      ? CTX_UNAVAILABLE_REPLY
+      : `❌ 命令执行失败: ${formatError(err)}`
+    await client.sendText(userId, reply).catch(() => {})
   }
   return true
 }

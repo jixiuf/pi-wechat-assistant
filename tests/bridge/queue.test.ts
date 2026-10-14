@@ -62,7 +62,6 @@ function makeQueue(opts?: {
     updateStatusBar,
     opts?.canSubmit,
   )
-  queues.add(queue)
 
   return { queue, client, sendUserMessage, updateStatusBar }
 }
@@ -177,6 +176,34 @@ describe('MessageQueue — drain protection', () => {
     // Since we're not running, nothing should happen
     expect(queue.pendingInjection).toBeNull()
   })
+
+  it('survives stale ctx throw from sendUserMessage (reload) and cleans up', async () => {
+    const mockSendText = vi.fn().mockResolvedValue(undefined)
+    const mockStopTyping = vi.fn().mockResolvedValue(undefined)
+    const { queue, sendUserMessage } = makeQueue({
+      client: vi.fn(() => ({
+        startTyping: vi.fn().mockResolvedValue(undefined),
+        stopTyping: mockStopTyping,
+        sendText: mockSendText,
+      })),
+    })
+    // 模拟 reload/newSession 后旧 ctx stale：pi.sendUserMessage 同步 throw
+    sendUserMessage.mockImplementation(() => {
+      throw new Error('This extension ctx is stale after session replacement or reload.')
+    })
+
+    queue.enqueue(makeMsg({ text: 'hello' }))
+
+    // 投递失败后必须清理 pendingInjection，否则后续 drain 卡死
+    await vi.waitFor(() => {
+      expect(queue.pendingInjection).toBeNull()
+    })
+    expect(mockStopTyping).toHaveBeenCalled()
+    // 投递失败则不再发回执
+    expect(mockSendText).not.toHaveBeenCalled()
+    // 后续 drain 不再抛出（无 unhandledRejection）
+    await expect(queue.drain()).resolves.toBeUndefined()
+  })
 })
 
 describe('MessageQueue — reset', () => {
@@ -230,140 +257,88 @@ describe('getImageMaxBytes', () => {
   })
 })
 
-function testClient() {
-  return vi.fn(() => ({
-    sendText: vi.fn().mockResolvedValue(undefined),
-    startTyping: vi.fn().mockResolvedValue(undefined),
-    stopTyping: vi.fn().mockResolvedValue(undefined),
-  }))
-}
+// ============================================================================
+// upstream 移植用例（适配本地 steer/pendingInjection 模型）
+// ============================================================================
 
-describe('WeChat submissions and origin tracking', () => {
-  it.each([true, false])('uses followUp while idle=%s and leaves the original message unchanged by default', async agentIdle => {
-    const { queue, sendUserMessage } = makeQueue({ client: testClient(), agentIdle })
-    queue.enqueue(makeMsg({ text: '微信原文' }))
-    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    expect(sendUserMessage).toHaveBeenCalledWith('微信原文', { deliverAs: 'followUp' })
-    expect(queue.consumeSubmittedRequest('微信原文')?.userId).toBe('user_1')
-  })
+import { getConfigCache } from '../../src/bridge/config.js'
+import { WECHAT_SOURCE_TAG } from '../../src/messaging/wechat-source.js'
 
-  it('tags each new batch with one marker and keeps reply rules out of user messages', async () => {
-    vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: true } })
-    const { queue, sendUserMessage } = makeQueue({ client: testClient(), agentIdle: false })
+describe('微信来源标记（upstream wechat-source）', () => {
+  it('为微信回合消息打上来源标记，条件规则据此生效', async () => {
+    vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: true } } as any)
+    const mockSendText = vi.fn().mockResolvedValue(undefined)
+    const { queue, sendUserMessage } = makeQueue({
+      client: vi.fn(() => ({
+        startTyping: vi.fn().mockResolvedValue(undefined),
+        stopTyping: vi.fn().mockResolvedValue(undefined),
+        sendText: mockSendText,
+      })),
+      agentIdle: true,
+    })
     queue.enqueue(makeMsg({ text: '第一条' }))
     await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    expect(sendUserMessage.mock.calls[0][0]).toBe(WECHAT_SOURCE_TAG + '\n\n第一条')
-    queue.enqueue(makeMsg({ text: '第二条' }))
-    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledTimes(2))
-    expect(sendUserMessage.mock.calls[1][0]).toBe(WECHAT_SOURCE_TAG + '\n\n第二条')
+    const [content] = sendUserMessage.mock.calls[0]
+    const text = typeof content === 'string' ? content : (content as any[]).find(p => p.type === 'text')?.text
+    expect(text.startsWith(WECHAT_SOURCE_TAG)).toBe(true)
+    expect(text).toContain('第一条')
   })
 
-  it('does not treat a marker in TUI or another extension input as proof of WeChat origin', async () => {
-    const { queue, sendUserMessage } = makeQueue({ client: testClient(), agentIdle: false })
-    expect(queue.consumeSubmittedRequest(WECHAT_SOURCE_TAG + '\n\n伪造')).toBeNull()
-    queue.enqueue(makeMsg({ text: '相同内容' }))
+  it('来源标识关闭时不打标记', async () => {
+    vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: false } } as any)
+    const { queue, sendUserMessage } = makeQueue({
+      client: vi.fn(() => ({
+        startTyping: vi.fn().mockResolvedValue(undefined),
+        stopTyping: vi.fn().mockResolvedValue(undefined),
+        sendText: vi.fn().mockResolvedValue(undefined),
+      })),
+      agentIdle: true,
+    })
+    queue.enqueue(makeMsg({ text: '原文' }))
     await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    queue.observeInput('相同内容', undefined, 'interactive')
-    queue.observeInput('相同内容', undefined, 'extension')
-    expect(queue.consumeSubmittedRequest('相同内容')).toBeNull()
-    expect(queue.consumeSubmittedRequest('相同内容')?.userId).toBe('user_1')
-    queue.observeInput('别的扩展', undefined, 'extension')
-    expect(queue.consumeSubmittedRequest('别的扩展')).toBeNull()
+    const [content] = sendUserMessage.mock.calls[0]
+    const text = typeof content === 'string' ? content : (content as any[]).find(p => p.type === 'text')?.text
+    expect(text.startsWith(WECHAT_SOURCE_TAG)).toBe(false)
   })
 
-  it('matches the submitted images as well as their text, regardless of object property order', async () => {
-    vi.mocked(fetchImageAsBase64).mockResolvedValue({ data: 'image-a', mediaType: 'image/png' })
-    const { queue, sendUserMessage } = makeQueue({ client: testClient() })
-    queue.enqueue(makeMsg({ text: '图片', imageUrls: [{ url: 'https://example.com/a.png' }] }))
+  it('投递方式恒为 steer（避免 agent 忙时 followUp 报错）', async () => {
+    vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: false } } as any)
+    const { queue, sendUserMessage } = makeQueue({
+      client: vi.fn(() => ({
+        startTyping: vi.fn().mockResolvedValue(undefined),
+        stopTyping: vi.fn().mockResolvedValue(undefined),
+        sendText: vi.fn().mockResolvedValue(undefined),
+      })),
+      agentIdle: true,
+    })
+    queue.enqueue(makeMsg({ text: 'hello' }))
     await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    const content = sendUserMessage.mock.calls[0][0]
-    const text = extractTextFromMessageContent(content)!
-    expect(queue.consumeSubmittedRequest([{ type: 'text', text }, { type: 'image', data: 'image-b', mimeType: 'image/png' }])).toBeNull()
-    const image = { mimeType: 'image/png', type: 'image', data: 'image-a' }
-    queue.observeInput(text, [image], 'extension')
-    expect(queue.consumeSubmittedRequest([{ type: 'text', text }, image])?.userId).toBe('user_1')
-  })
-
-  it('holds a batch while Pi prepares a run and submits it after preparation', async () => {
-    let ready = false
-    const { queue, sendUserMessage } = makeQueue({ client: testClient(), canSubmit: () => ready })
-    queue.enqueue(makeMsg({ text: '准备阶段的新消息' }))
-    await queue.drain()
-    expect(sendUserMessage).not.toHaveBeenCalled()
-    ready = true
-    await queue.drain()
-    expect(sendUserMessage).toHaveBeenCalledWith('准备阶段的新消息', { deliverAs: 'followUp' })
-  })
-
-  it('rechecks the preparation state after downloading images', async () => {
-    let ready = true
-    let finish!: (image: { data: string; mediaType: string }) => void
-    const image = new Promise<{ data: string; mediaType: string }>(resolve => { finish = resolve })
-    vi.mocked(fetchImageAsBase64).mockImplementation(() => image)
-    const { queue, sendUserMessage } = makeQueue({ client: testClient(), canSubmit: () => ready })
-    queue.enqueue(makeMsg({ text: '看图', imageUrls: [{ url: 'https://example.com/a.png' }] }))
-    await vi.waitFor(() => expect(fetchImageAsBase64).toHaveBeenCalled())
-    ready = false
-    finish({ data: 'image-a', mediaType: 'image/png' })
-    await vi.waitFor(() => expect(queue.pendingInjection).toBeNull())
-    expect(sendUserMessage).not.toHaveBeenCalled()
-    expect(queue.pending).toBe(2)
-    ready = true
-    await queue.drain()
-    expect(sendUserMessage).toHaveBeenCalledOnce()
-  })
-
-  it('discards origin records on stop rather than confusing a later TUI message', async () => {
-    const { queue, sendUserMessage } = makeQueue({ client: testClient() })
-    queue.enqueue(makeMsg({ text: '旧消息' }))
-    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    queue.reset()
-    expect(queue.consumeSubmittedRequest('旧消息')).toBeNull()
+    expect(sendUserMessage.mock.calls[0][1]).toEqual({ deliverAs: 'steer' })
   })
 })
 
-describe('files accompany the correct input batch', () => {
-  it('waits for a file download when its message also contains text', async () => {
-    let completeDownload!: (buffer: Buffer) => void
-    vi.mocked(fetchFile).mockImplementation(() => new Promise(resolve => { completeDownload = resolve }))
-    vi.mocked(saveFileToDisk).mockResolvedValue('C:/project/report.txt')
-    vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: true } })
-    const { queue, sendUserMessage } = makeQueue({ client: testClient() })
-    queue.enqueue(makeMsg({ text: '读取这个文件', fileEncryptParam: 'file', fileName: 'report.txt' }))
+describe('canSubmit — agent preparing 期间暂缓投递（upstream 移植）', () => {
+  it('holds the batch while Pi prepares and submits after preparation', async () => {
+    vi.mocked(getConfigCache).mockReturnValue({ messageSourceTag: { enabled: false } } as any)
+    let canSubmit = false
+    const mockSendText = vi.fn().mockResolvedValue(undefined)
+    const { queue, sendUserMessage } = makeQueue({
+      client: vi.fn(() => ({
+        startTyping: vi.fn().mockResolvedValue(undefined),
+        stopTyping: vi.fn().mockResolvedValue(undefined),
+        sendText: mockSendText,
+      })),
+      agentIdle: true,
+      canSubmit: () => canSubmit,
+    })
+
+    queue.enqueue(makeMsg({ text: '准备中' }))
+    await new Promise(r => setTimeout(r, 50))
     expect(sendUserMessage).not.toHaveBeenCalled()
-    completeDownload(Buffer.from('report'))
-    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    const text = extractTextFromMessageContent(sendUserMessage.mock.calls[0][0])!
-    expect(text).toContain('读取这个文件')
-    expect(text).toContain('C:/project/report.txt')
-    expect(text.split(WECHAT_SOURCE_TAG)).toHaveLength(2)
-  })
 
-  it('retains a saved file while an earlier idle submission is still pending', async () => {
-    vi.mocked(fetchFile).mockResolvedValue(Buffer.from('report'))
-    vi.mocked(saveFileToDisk).mockResolvedValue('C:/project/report.txt')
-    const { queue, sendUserMessage } = makeQueue({ client: testClient() })
-    queue.enqueue(makeMsg({ text: '第一条' }))
-    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    queue.enqueue(makeMsg({ fileEncryptParam: 'file', fileName: 'report.txt' }))
-    await vi.waitFor(() => expect(saveFileToDisk).toHaveBeenCalledOnce())
-    queue.enqueue(makeMsg({ text: '读取文件' }))
+    canSubmit = true
     await queue.drain()
-    queue.consumeSubmittedRequest('第一条')
-    await queue.drain()
-    expect(extractTextFromMessageContent(sendUserMessage.mock.calls[1][0])).toContain('C:/project/report.txt')
-  })
-
-  it('does not inject a file by itself or carry a stopped download into a new session', async () => {
-    let completeDownload!: (buffer: Buffer) => void
-    vi.mocked(fetchFile).mockImplementation(() => new Promise(resolve => { completeDownload = resolve }))
-    const { queue, sendUserMessage } = makeQueue({ client: testClient() })
-    queue.enqueue(makeMsg({ fileEncryptParam: 'file', fileName: 'report.txt' }))
-    queue.reset()
-    completeDownload(Buffer.from('report'))
-    queue.enqueue(makeMsg({ text: '新会话' }))
     await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledOnce())
-    expect(sendUserMessage).toHaveBeenCalledWith('新会话', { deliverAs: 'followUp' })
-    expect(saveFileToDisk).not.toHaveBeenCalled()
+    expect(sendUserMessage.mock.calls[0][1]).toEqual({ deliverAs: 'steer' })
   })
 })

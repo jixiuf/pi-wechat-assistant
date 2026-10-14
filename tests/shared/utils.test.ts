@@ -10,6 +10,8 @@ import {
   summarizePreview,
   formatError,
   isAbortError,
+  isCtxUsable,
+  isStaleExtensionError,
 } from '../../src/shared/utils.js'
 
 describe('ok / fail', () => {
@@ -104,5 +106,42 @@ describe('isAbortError', () => {
   it('returns false for non-Error values', () => {
     expect(isAbortError('string')).toBe(false)
     expect(isAbortError(null)).toBe(false)
+  })
+})
+
+// Mirrors the pi message raised by runner.assertActive() after
+// newSession/fork/switchSession/reload invalidates the old extension runner.
+const STALE_MESSAGE =
+  'This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx.'
+
+describe('isStaleExtensionError', () => {
+  it('detects the pi stale-runner message', () => {
+    expect(isStaleExtensionError(new Error(STALE_MESSAGE))).toBe(true)
+  })
+
+  it('returns false for unrelated errors', () => {
+    expect(isStaleExtensionError(new Error('boom'))).toBe(false)
+    expect(isStaleExtensionError('is stale after session replacement or reload')).toBe(true)
+    expect(isStaleExtensionError(null)).toBe(false)
+  })
+})
+
+describe('isCtxUsable', () => {
+  it('is false for null/undefined ctx', () => {
+    expect(isCtxUsable(null)).toBe(false)
+    expect(isCtxUsable(undefined)).toBe(false)
+  })
+
+  it('is true while ctx getters still resolve', () => {
+    expect(isCtxUsable({ sessionManager: {} })).toBe(true)
+  })
+
+  it('is false when the backing getter throws (stale runner)', () => {
+    const staleCtx = {
+      get sessionManager(): unknown {
+        throw new Error(STALE_MESSAGE)
+      },
+    }
+    expect(isCtxUsable(staleCtx)).toBe(false)
   })
 })

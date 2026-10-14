@@ -36,12 +36,11 @@ export interface CommandDeps {
   loadClient: () => Promise<WeixinClient | null>
   isRunning: () => boolean
   setRunning: (v: boolean) => void
-  requestHandoff: typeof requestHandoff
   setPollAbort: (c: AbortController | null) => void
   queue: MessageQueue
   lock: () => Promise<{ success: boolean; message: string }>
   stopBridge: (options?: { releaseLock?: boolean }) => Promise<void>
-  pollMessages: (client: WeixinClient) => Promise<void>
+  pollMessages: () => Promise<void>
   latestCtx: () => Ctx | null
   setLatestCtx: (ctx: Ctx) => void
   updateStatusBar: () => void
@@ -123,71 +122,17 @@ async function cmdLogin(args: string, ctx: Ctx, deps: CommandDeps): Promise<void
   }
 }
 
-const pendingStarts = new WeakMap<CommandDeps, AbortController>()
-
-export function cancelBridgeStart(deps: CommandDeps): void {
-  pendingStarts.get(deps)?.abort()
-}
-
-export async function startBridge(_args: string, ctx: Ctx, deps: CommandDeps, interactive = true): Promise<void> {
+export async function startBridge(_args: string, ctx: Ctx, deps: CommandDeps, _interactive = true): Promise<void> {
   deps.setLatestCtx(ctx)
   if (deps.isRunning()) { deps.notify('微信桥接已经在运行', 'info'); return }
-  if (pendingStarts.has(deps)) { deps.notify('微信桥接正在启动或等待交接', 'info'); return }
-  const attempt = new AbortController()
-  pendingStarts.set(deps, attempt)
-  const check = () => attempt.signal.throwIfAborted()
-  let acquired = false
-  try {
-    const activeClient = await deps.loadClient()
-    if (!activeClient) { deps.notify('未找到微信凭证，请先执行 /wechat login', 'error'); return }
-    if (!ctx.isIdle()) {
-      if (!('waitForIdle' in ctx)) return
-      deps.notify('等待当前任务结束后启动微信桥接…', 'info')
-      await ctx.waitForIdle()
-    }
-    check()
-    await deps.preflightBridge()
-    check()
-    const owner = await getBridgeLockState()
-    check()
-    if (owner.kind === 'other' || owner.kind === 'current' || owner.kind === 'unknown') {
-      if (owner.kind === 'unknown' || owner.protocol !== 1 || !ctx.hasUI || !interactive) {
-        deps.notify(describeBridgeLock(owner), 'error')
-        return
-      }
-      const takeover = '请求旧会话停止，等待释放后在本会话启动'
-      if ((await loadConfig()).handoff === 'auto') {
-        deps.notify(`正在自动请求旧会话（PID ${owner.pid}）停止并释放桥接（最多 30 秒）…`, 'info')
-      } else {
-        const choice = await ctx.ui.select(`微信桥接由其他 pi 会话持有（PID ${owner.pid}）`, [takeover, '取消'])
-        check()
-        if (choice !== takeover) { deps.notify('已取消，未改动其他会话的微信桥接。', 'info'); return }
-        deps.notify('正在等待旧会话停止并释放桥接（最多 30 秒）…', 'info')
-      }
-      await deps.requestHandoff(owner, attempt.signal)
-      check()
-    }
-    const result = await deps.lock()
-    acquired = result.success
-    check()
-    if (!result.success) { deps.notify(result.message, 'error'); return }
-    // The previous owner may have advanced its cursor while we were waiting.
-    await activeClient.reloadReceiveState()
-    check()
-    await deps.prepareBridge()
-    check()
-    deps.setRunning(true)
-    deps.setPollAbort(new AbortController())
-    deps.notify('微信桥接已启动 📱', 'info')
-    deps.updateStatusBar()
-    void deps.pollMessages(activeClient).catch(error => deps.notify(`微信轮询异常退出: ${formatError(error)}`, 'error'))
-  } catch (error) {
-    const cancelled = attempt.signal.aborted
-    if (acquired) await deps.stopBridge({ releaseLock: true })
-    deps.notify(cancelled ? '微信桥接启动已取消。' : '微信桥接启动失败: ' + formatError(error), cancelled ? 'info' : 'error')
-  } finally {
-    pendingStarts.delete(deps)
-  }
+  const lockResult = await deps.lock()
+  if (!lockResult.success) { deps.notify(lockResult.message, 'error'); return }
+  deps.setRunning(true)
+  deps.setPollAbort(new AbortController())
+  deps.notify('微信桥接已启动 📱', 'info')
+  deps.updateStatusBar()
+  // pollMessages(startPolling) 立即返回：轮询由 gateway 内部循环接管，pollAbort 不能在此清理
+  void deps.pollMessages()
 }
 
 async function cmdStop(_args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
