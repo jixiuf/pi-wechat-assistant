@@ -1,6 +1,6 @@
 # 安全说明
 
-[English](SECURITY.md) | 简体中文
+[English](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/SECURITY.md) | 简体中文
 
 本扩展处理本地登录凭据、消息发送凭据、对话内容及项目文件。请勿在公开 issue 或 PR 中包含真实 token、账号标识、私人消息或未脱敏日志。
 

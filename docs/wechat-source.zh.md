@@ -1,6 +1,6 @@
 # 微信来源与回复约定
 
-[English](wechat-source.md) | 简体中文
+[English](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/wechat-source.md) | 简体中文
 
 ## 发送工具与桥接归属
 
@@ -29,7 +29,7 @@
 
 ## 修改回复模板
 
-内置模板位于 [`prompts/wechat.md`](../prompts/wechat.md)。用户覆盖文件为 `~/.pi/agent/wechat-assistant/wechat-prompt.md`，Windows 通常是 `C:\Users\<用户名>\.pi\agent\wechat-assistant\wechat-prompt.md`。
+内置模板位于 [`prompts/wechat.md`](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/prompts/wechat.md)。用户覆盖文件为 `~/.pi/agent/wechat-assistant/wechat-prompt.md`，Windows 通常是 `C:\Users\<用户名>\.pi\agent\wechat-assistant\wechat-prompt.md`。
 
 ```text
 /wechat prompt show

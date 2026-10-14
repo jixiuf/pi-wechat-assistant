@@ -1,6 +1,6 @@
 # Architecture
 
-English | [简体中文](architecture.zh.md)
+English | [简体中文](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/architecture.zh.md)
 
 ## Repository layout
 
@@ -61,4 +61,4 @@ The folders group responsibilities; they do not imply fully independent layers. 
 
 Account state lives in `~/.pi/agent/wechat-assistant/`; received files live in the active project's `.pi-wechat-files/`. These are runtime data, not repository assets. Tests use mocks or scratch directories under `node_modules/.cache/`.
 
-For development commands and release checks, see [Contributing](CONTRIBUTING.md).
+For development commands and release checks, see [Contributing](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/CONTRIBUTING.md).

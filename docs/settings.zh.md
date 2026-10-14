@@ -1,6 +1,6 @@
 # 配置
 
-[English](settings.md) | 简体中文
+[English](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/settings.md) | 简体中文
 
 执行 `/wechat config` 打开 pi 自带的选择和输入窗口。列表直接显示当前值和简短用途。图片设置先提供常用预设（不等待 / 2 / 8 / 15 秒，以及 10 / 20 / 50 MB），也可选择“自定义”，按单位和范围提示填写。先选配置项，再选值；每次确认单独保存。Esc 取消当前值选择、从高级设置返回，或关闭主菜单。打开设置不会启动桥接，也不会注册发送工具。无 UI 时显示文本；`/wechat config show` 始终显示文本。
 
@@ -19,4 +19,4 @@
 
 配置保存在 `~/.pi/agent/wechat-assistant/config.json`。保存后本进程和以后新开的会话使用新值；其他已打开进程有自己的缓存，不会自动重读。若要换进程修改配置，先重载扩展或重新打开会话。图片环境变量仍作为没有对应 JSON 配置时的回退值，窗口显示实际生效的图片设置。本次没有新增跨进程配置实时同步。
 
-原有命令保留，新增显式命令 `/wechat config auto-start on|off`、`/wechat config handoff ask|auto`、`/wechat config remote-tools on|off`。回复模板的位置和系统提示词行为见[微信回复规则](wechat-source.zh.md)。
+原有命令保留，新增显式命令 `/wechat config auto-start on|off`、`/wechat config handoff ask|auto`、`/wechat config remote-tools on|off`。回复模板的位置和系统提示词行为见[微信回复规则](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/wechat-source.zh.md)。

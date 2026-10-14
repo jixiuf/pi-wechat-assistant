@@ -1,6 +1,6 @@
 # Settings
 
-English | [简体中文](settings.zh.md)
+English | [简体中文](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/settings.zh.md)
 
 Run `/wechat config` to open host-native selection and input dialogs. Each row includes its current value and a short explanation. Image settings offer presets (0/2/8/15 seconds and 10/20/50 MB) plus custom input with units and ranges. Select a setting, then choose a value; each confirmed change is saved separately. Esc cancels a value choice, returns from advanced settings, or closes the main menu. Opening settings does not start the bridge or register sending tools. Without UI, the command shows text; `/wechat config show` always shows text.
 
@@ -19,4 +19,4 @@ Keep custom source-marker text and the blocked local question-tool names in `con
 
 Configuration is stored at `~/.pi/agent/wechat-assistant/config.json`. Saves affect this process and future sessions. Already-open processes cache their settings and do not reload another process's changes automatically; reload the extension or reopen the session before editing settings from another process. Image environment variables remain fallbacks when no corresponding JSON setting exists; the menu shows effective image values. There is no new cross-process settings synchronization in this change.
 
-Existing commands remain supported. Additional explicit commands are `/wechat config auto-start on|off`, `/wechat config handoff ask|auto`, and `/wechat config remote-tools on|off`. For reply files and system-prompt behavior see [WeChat rules](wechat-source.md).
+Existing commands remain supported. Additional explicit commands are `/wechat config auto-start on|off`, `/wechat config handoff ask|auto`, and `/wechat config remote-tools on|off`. For reply files and system-prompt behavior see [WeChat rules](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/wechat-source.md).

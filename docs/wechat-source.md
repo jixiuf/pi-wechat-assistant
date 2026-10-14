@@ -1,6 +1,6 @@
 # WeChat source and reply rules
 
-English | [简体中文](wechat-source.zh.md)
+English | [简体中文](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/wechat-source.zh.md)
 
 ## Sending tools and bridge ownership
 
@@ -29,7 +29,7 @@ With bidirectional sync enabled, mirrored TUI messages include an image count. I
 
 ## Edit the reply template
 
-The packaged default is [`prompts/wechat.md`](../prompts/wechat.md). The optional user override is `~/.pi/agent/wechat-assistant/wechat-prompt.md` (normally `C:\Users\<user>\.pi\agent\wechat-assistant\wechat-prompt.md` on Windows).
+The packaged default is [`prompts/wechat.md`](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/prompts/wechat.md). The optional user override is `~/.pi/agent/wechat-assistant/wechat-prompt.md` (normally `C:\Users\<user>\.pi\agent\wechat-assistant\wechat-prompt.md` on Windows).
 
 ```text
 /wechat prompt show

@@ -1,6 +1,6 @@
 # 架构说明
 
-[English](architecture.md) | 简体中文
+[English](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/architecture.md) | 简体中文
 
 ## 仓库结构
 
@@ -61,4 +61,4 @@ assets/                        标志与包封面
 
 账号状态保存在 `~/.pi/agent/wechat-assistant/`，收到的文件保存在当前项目的 `.pi-wechat-files/`。这些是运行时数据，不属于仓库资源。测试使用模拟依赖或 `node_modules/.cache/` 下的临时目录。
 
-开发命令和发布检查见[贡献指南](CONTRIBUTING.zh.md)。
+开发命令和发布检查见[贡献指南](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/CONTRIBUTING.zh.md)。

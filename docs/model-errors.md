@@ -1,6 +1,6 @@
 # Model error notifications
 
-English | [简体中文](model-errors.zh.md)
+English | [简体中文](https://github.com/shenjiecode/pi-wechat-assistant/blob/main/docs/model-errors.zh.md)
 
 While `/wechat start` is active, failed model requests are reported to the current reply recipient. No extra switch is needed. With `/wechat config bidirectional off`, only bridge-originated requests generate these notices; with sync on, TUI requests are included. The source-marker switch does not affect error routing.
 
