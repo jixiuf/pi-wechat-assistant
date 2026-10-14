@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [Unreleased]
+
+### Added
+- `handoff: ask | auto` (default ask, issue #17): with Auto, TUI starts hand off directly to a cooperative-handoff owner (0.4.4+) instead of showing the takeover dialog. Selectable in the settings menu next to auto-start, and enabling auto-start offers to switch it to Auto.
+  `handoff: ask | auto`（默认 ask，issue #17）：设为自动时，TUI 启动对支持协作交接（0.4.4+）的持锁方直接请求交接，不再弹窗；设置菜单中与自动启动相邻，开启自动启动时会引导改设为自动。
 ## [0.5.1] - 2026-10-14
 
 ### Fixed

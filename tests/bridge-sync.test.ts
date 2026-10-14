@@ -774,6 +774,115 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(activeTools).toEqual(['read', 'bash'])
   })
 
+  it('uses automatic handoff without a dialog when handoff is auto', async () => {
+    state.config.handoff = 'auto'
+    state.lockConflict = true
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session', protocol: 1 }
+    state.requestHandoff.mockImplementation(async () => {
+      state.lockConflict = false
+      state.lockState = { kind: 'missing' }
+    })
+    await command('start')
+    expect(ctx.ui.select).not.toHaveBeenCalled()
+    expect(state.requestHandoff).toHaveBeenCalledTimes(1)
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('自动请求旧会话'), 'info')
+    expect(activeTools).toEqual(['read', 'bash', 'send_file_to_wechat', 'send_image_to_wechat'])
+  })
+
+  it('never auto-takes-over legacy owners or headless hosts even with handoff auto', async () => {
+    state.config.handoff = 'auto'
+    state.lockConflict = true
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'legacy-session' } // 无 protocol=1
+    await command('start')
+    expect(ctx.ui.select).not.toHaveBeenCalled()
+    expect(state.requestHandoff).not.toHaveBeenCalled()
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('424242'), 'error')
+
+    ctx.hasUI = false
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session', protocol: 1 }
+    const printed: string[] = []
+    const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { printed.push(args.join(' ')) })
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { printed.push(args.join(' ')) })
+    try {
+      await command('start')
+    } finally {
+      log.mockRestore()
+      errSpy.mockRestore()
+    }
+    expect(ctx.ui.select).not.toHaveBeenCalled()
+    expect(state.requestHandoff).not.toHaveBeenCalled()
+    expect(printed.join('')).toContain('424242')
+  })
+
+  it('auto-starts with automatic handoff when handoff is auto', async () => {
+    state.config.autoStart = true
+    state.config.handoff = 'auto'
+    state.lockConflict = true
+    state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session', protocol: 1 }
+    state.requestHandoff.mockImplementation(async () => {
+      state.lockConflict = false
+      state.lockState = { kind: 'missing' }
+    })
+    await handlers.session_start({}, ctx)
+    expect(ctx.ui.select).not.toHaveBeenCalled()
+    expect(state.requestHandoff).toHaveBeenCalledTimes(1)
+    expect(activeTools).toEqual(['read', 'bash', 'send_file_to_wechat', 'send_image_to_wechat'])
+  })
+
+  it('suggests automatic handoff when enabling auto-start', async () => {
+    ctx.ui.select.mockResolvedValueOnce('改为自动接管（推荐）')
+    await command('config auto-start on')
+    expect(state.config.autoStart).toBe(true)
+    expect(ctx.ui.select).toHaveBeenCalledWith(
+      expect.stringContaining('其他会话持有微信桥接'),
+      ['改为自动接管（推荐）', '保持每次询问（当前）'],
+    )
+    expect(state.config.handoff).toBe('auto')
+  })
+
+  it('keeps the handoff mode on ask when the auto-start suggestion is declined', async () => {
+    ctx.ui.select.mockResolvedValueOnce('保持每次询问（当前）')
+    await command('config auto-start on')
+    expect(state.config.autoStart).toBe(true)
+    expect(state.config.handoff).toBeUndefined()
+  })
+
+  it('does not ask again when auto-start is already paired with automatic handoff', async () => {
+    state.config.handoff = 'auto'
+    await command('config auto-start on')
+    expect(ctx.ui.select).not.toHaveBeenCalled()
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('新会话自动启动已开启'), 'info')
+  })
+
+  it('mentions the handoff command when enabling auto-start without a UI', async () => {
+    ctx.hasUI = false
+    const printed: string[] = []
+    const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { printed.push(args.join(' ')) })
+    try {
+      await command('config auto-start on')
+    } finally {
+      log.mockRestore()
+    }
+    expect(printed.join('')).toContain('/wechat config handoff auto')
+  })
+
+  it('sets and validates the handoff mode explicitly', async () => {
+    await command('config handoff auto')
+    expect(state.config.handoff).toBe('auto')
+    await command('config handoff maybe')
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith('用法: /wechat config handoff ask|auto', 'error')
+    expect(state.config.handoff).toBe('auto')
+  })
+
+  it('toggles the handoff mode from the settings menu', async () => {
+    ctx.ui.select
+      .mockResolvedValueOnce('持锁接管方式：询问 · 其他会话持锁时先弹窗确认')
+      .mockResolvedValueOnce('自动接管（不再询问）')
+      .mockResolvedValueOnce(undefined)
+    await command('config')
+    expect(state.config.handoff).toBe('auto')
+  })
+
   it('takes over the lock after explicit confirmation and starts locally', async () => {
     state.lockConflict = true
     state.lockState = { kind: 'other', pid: 424242, sessionId: 'other-session', protocol: 1 }

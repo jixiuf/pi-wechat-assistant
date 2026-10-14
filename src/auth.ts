@@ -118,6 +118,8 @@ export async function clearContextTokens(): Promise<void> {
 
 export interface BridgeConfig {
   autoStart?: boolean
+  /** 持锁接管方式：ask=弹窗确认（默认），auto=对支持协作交接的会话直接请求交接。 */
+  handoff?: 'ask' | 'auto'
   /** 默认同步 TUI 输入和 AI 回复到微信；关闭后仅转发微信任务回复。 */
   bidirectionalSync?: boolean
   /** 是否允许微信端 /tools 命令修改本机工具权限（安全考虑，默认关闭） */

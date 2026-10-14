@@ -158,10 +158,14 @@ export async function startBridge(_args: string, ctx: Ctx, deps: CommandDeps, in
         return
       }
       const takeover = '请求旧会话停止，等待释放后在本会话启动'
-      const choice = await ctx.ui.select(`微信桥接由其他 pi 会话持有（PID ${owner.pid}）`, [takeover, '取消'])
-      check()
-      if (choice !== takeover) { deps.notify('已取消，未改动其他会话的微信桥接。', 'info'); return }
-      deps.notify('正在等待旧会话停止并释放桥接（最多 30 秒）…', 'info')
+      if ((await loadConfig()).handoff === 'auto') {
+        deps.notify(`正在自动请求旧会话（PID ${owner.pid}）停止并释放桥接（最多 30 秒）…`, 'info')
+      } else {
+        const choice = await ctx.ui.select(`微信桥接由其他 pi 会话持有（PID ${owner.pid}）`, [takeover, '取消'])
+        check()
+        if (choice !== takeover) { deps.notify('已取消，未改动其他会话的微信桥接。', 'info'); return }
+        deps.notify('正在等待旧会话停止并释放桥接（最多 30 秒）…', 'info')
+      }
       await deps.requestHandoff(owner, attempt.signal)
       check()
     }
@@ -270,13 +274,14 @@ async function applyConfigCommand(args: string, ctx: ExtensionCommandContext, de
   if (!key || key === 'show') {
     deps.notify([
       `自动启动: ${config.autoStart ? '已开启' : '已关闭'}`,
+      `持锁接管: ${config.handoff === 'auto' ? '自动（直接请求交接）' : '询问（默认）'}`,
       `双向同步: ${config.bidirectionalSync !== false ? '已开启（默认）' : '已关闭'}`,
       `微信 /tools: ${config.allowRemoteTools ? '已开启' : '已关闭（/wechat remotetools on 开启）'}`,
       `微信来源与回复约定: ${config.messageSourceTag?.enabled === false ? '已关闭' : '已开启（默认）'}`,
       `来源标识: ${config.messageSourceTag?.wechatTag?.trim() || WECHAT_SOURCE_TAG}`,
       `图片合并等待: ${getImageBatchWaitMs()}ms`,
       `图片上限: ${Math.round(getImageMaxBytes() / 1024 / 1024)}MB`,
-      '', '用法:', '/wechat config source on|off', '/wechat config bidirectional on|off', '/wechat config image-wait 8000', '/wechat config image-max 50',
+      '', '用法:', '/wechat config source on|off', '/wechat config bidirectional on|off', '/wechat config handoff ask|auto', '/wechat config image-wait 8000', '/wechat config image-max 50',
     ].join('\n'), 'info')
     return
   }
@@ -310,13 +315,38 @@ async function applyConfigCommand(args: string, ctx: ExtensionCommandContext, de
     if (key === 'auto-start') config.autoStart = value === 'on'
     else config.allowRemoteTools = value === 'on'
     await saveConfig(config)
-    deps.notify(key === 'auto-start'
-      ? `新会话自动启动已${value === 'on' ? '开启' : '关闭'}，不改变当前桥接状态。`
-      : `微信端修改工具权限已${value === 'on' ? '开启' : '关闭'}。`, 'info')
+    if (key === 'remote-tools') {
+      deps.notify(`微信端修改工具权限已${value === 'on' ? '开启' : '关闭'}。`, 'info')
+      return
+    }
+    const summary = `新会话自动启动已${value === 'on' ? '开启' : '关闭'}，不改变当前桥接状态。`
+    // 自动启动 + 每次弹窗确认是典型抱怨组合（issue #17）：开启一次就引导配好接管方式。
+    if (value === 'off' || config.handoff === 'auto') { deps.notify(summary, 'info'); return }
+    if (!ctx.hasUI) {
+      deps.notify(`${summary}\n提示: 可将持锁接管方式设为自动，避免每次打开会话都要确认：/wechat config handoff auto`, 'info')
+      return
+    }
+    const auto = '改为自动接管（推荐）'
+    deps.notify(summary, 'info')
+    const pick = await ctx.ui.select('遇到其他会话持有微信桥接时如何处理？', [auto, '保持每次询问（当前）'])
+    if (pick === auto) {
+      config.handoff = 'auto'
+      await saveConfig(config)
+      deps.notify('持锁接管方式已设为自动：支持协作交接的会话持锁时会直接请求交接，不再弹窗。', 'info')
+    }
+    return
+  }
+  if (key === 'handoff') {
+    if (value !== 'ask' && value !== 'auto') { deps.notify('用法: /wechat config handoff ask|auto', 'error'); return }
+    config.handoff = value
+    await saveConfig(config)
+    deps.notify(value === 'auto'
+      ? '持锁接管方式已设为自动：自动启动或 /wechat start 遇到支持协作交接的会话持锁时直接请求交接，不再弹窗。'
+      : '持锁接管方式已设为询问：遇到其他会话持锁时弹窗确认。', 'info')
     return
   }
   if (key !== 'image-wait' && key !== 'image-max') {
-    deps.notify('未知配置项。支持: source, bidirectional, auto-start, remote-tools, image-wait, image-max', 'error')
+    deps.notify('未知配置项。支持: source, bidirectional, auto-start, handoff, remote-tools, image-wait, image-max', 'error')
     return
   }
   const numeric = Number(value)

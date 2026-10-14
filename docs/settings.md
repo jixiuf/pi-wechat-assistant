@@ -7,7 +7,8 @@ Run `/wechat config` to open host-native selection and input dialogs. Each row i
 | Location | Setting | Default | Purpose |
 | --- | --- | --- | --- |
 | Common | Bidirectional sync | On | Forward new desktop input and AI replies to WeChat. Off keeps only replies to WeChat requests. |
-| Common | Auto-start WeChat bridge | Off | Attempt to connect WeChat when a pi session opens. In the TUI, a bridge held by another session triggers the same takeover dialog as `/wechat start` (cancel leaves it untouched); headless modes report the lock instead of asking. Does not start/stop the current bridge. |
+| Common | Auto-start WeChat bridge | Off | Attempt to connect WeChat when a pi session opens. In the TUI, a bridge held by another session follows the handoff mode below (ask or auto); headless modes report the lock instead of asking. Enabling it offers to switch the handoff mode to Auto. Does not start/stop the current bridge. |
+| Common | Bridge handoff mode | Ask | When another session holds a cooperative-handoff bridge (0.4.4+), Ask shows the takeover dialog and Auto requests the handoff directly. Headless modes never auto-take-over. |
 | Common | WeChat message tag and formatting | On | One switch for the `[微信]` marker, WeChat-friendly reply formatting, and the local question-tool guard. Waits for an active task to finish before changing. |
 | Common | Reply template actions | Packaged template | View template/path, export without overwriting, or reload an edited file. These are actions, not additional switches. |
 | Advanced | WeChat /tools override | Off | Allow WeChat `/tools` to modify local tool permissions. This does not control the two WeChat file/image sending tools. |
@@ -18,7 +19,7 @@ Keep custom source-marker text and the blocked local question-tool names in `con
 
 Configuration is stored at `~/.pi/agent/wechat-assistant/config.json`. Saves affect this process and future sessions. Already-open processes cache their settings and do not reload another process's changes automatically; reload the extension or reopen the session before editing settings from another process. Image environment variables remain fallbacks when no corresponding JSON setting exists; the menu shows effective image values. There is no new cross-process settings synchronization in this change.
 
-Existing commands remain supported. Additional explicit commands are `/wechat config auto-start on|off` and `/wechat config remote-tools on|off`. For reply files and system-prompt behavior see [WeChat rules](wechat-source.md).
+Existing commands remain supported. Additional explicit commands are `/wechat config auto-start on|off`, `/wechat config handoff ask|auto`, and `/wechat config remote-tools on|off`. For reply files and system-prompt behavior see [WeChat rules](wechat-source.md).
 
 ## 中文
 
@@ -27,7 +28,8 @@ Existing commands remain supported. Additional explicit commands are `/wechat co
 | 位置 | 配置项 | 默认值 | 为什么需要 |
 | --- | --- | --- | --- |
 | 常用 | 双向同步 | 开启 | 控制是否同步新的电脑输入和 AI 回复；关闭后仅回传微信任务回复。 |
-| 常用 | 自动启动微信桥接 | 关闭 | 打开 pi 会话时尝试连接微信。TUI 下若桥接被其他会话持有，会弹出与 `/wechat start` 相同的接管确认（取消则不改动原会话）；无界面模式只报告锁占用。不改变当前桥接启停状态。 |
+| 常用 | 自动启动微信桥接 | 关闭 | 打开 pi 会话时尝试连接微信。TUI 下若桥接被其他会话持有，按下方「持锁接管方式」处理；无界面模式只报告锁占用。开启时会引导把接管方式改为自动。不改变当前桥接启停状态。 |
+| 常用 | 持锁接管方式 | 询问 | 其他会话持有协作交接（0.4.4+）的桥接时，询问 = 弹窗确认，自动 = 直接请求旧会话交接。无界面模式始终不自动接管。 |
 | 常用 | 微信消息标识与排版 | 开启 | 微信消息加来源标记（默认 [微信]），引导 AI 用短段落和文字提问，并拦截已配置的本机提问工具；有任务运行时等待其结束再修改。 |
 | 常用 | 回复模板操作 | 内置模板 | 查看模板及路径、导出默认模板、不覆盖已有文件、重载编辑后的模板；这些是操作，不额外增加开关。 |
 | 高级 | 微信端 /tools 修改本机权限 | 关闭 | 允许微信 `/tools` 命令修改本机工具权限；不控制微信文件和图片发送工具的启停。 |
@@ -38,4 +40,4 @@ Existing commands remain supported. Additional explicit commands are `/wechat co
 
 配置保存在 `~/.pi/agent/wechat-assistant/config.json`。保存后本进程和以后新开的会话使用新值；其他已打开进程有自己的缓存，不会自动重读。若要换进程修改配置，先重载扩展或重新打开会话。图片环境变量仍作为没有对应 JSON 配置时的回退值，窗口显示实际生效的图片设置。本次没有新增跨进程配置实时同步。
 
-原有命令保留，新增显式命令 `/wechat config auto-start on|off`、`/wechat config remote-tools on|off`。回复模板的位置和系统提示词行为见[微信回复规则](wechat-source.md)。
+原有命令保留，新增显式命令 `/wechat config auto-start on|off`、`/wechat config handoff ask|auto`、`/wechat config remote-tools on|off`。回复模板的位置和系统提示词行为见[微信回复规则](wechat-source.md)。
