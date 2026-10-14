@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [Unreleased]
+## [0.5.2] - 2026-10-14
 
 ### Added
 - `handoff: ask | auto` (default ask, issue #17): with Auto, TUI starts hand off directly to a cooperative-handoff owner (0.4.4+) instead of showing the takeover dialog. Selectable in the settings menu next to auto-start, and enabling auto-start offers to switch it to Auto.
