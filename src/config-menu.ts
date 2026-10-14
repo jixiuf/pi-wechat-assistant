@@ -21,7 +21,7 @@ export async function showConfigMenu(ctx: ExtensionCommandContext, deps: ConfigM
       { id: 'image-max', label: `单张图片下载上限：${deps.imageMax() / 1024 / 1024} MB · 超过则拒绝下载` },
       { id: 'back', label: '返回常用设置' },
     ] : [
-      { id: 'bidirectional', label: `双向同步：${enabled(config.bidirectionalSync !== false)} · 电脑输入和 AI 回复也转发到微信` },
+      { id: 'bidirectional', label: `双向同步：${enabled(config.bidirectionalSync === true)} · 电脑输入和 AI 回复也转发到微信` },
       { id: 'auto-start', label: `自动启动微信桥接：${enabled(config.autoStart === true)} · 打开 pi 时尝试连接微信` },
       { id: 'handoff', label: `持锁接管方式：${config.handoff === 'auto' ? '自动' : '询问'} · ${config.handoff === 'auto' ? '其他会话持锁时直接请求交接' : '其他会话持锁时先弹窗确认'}` },
       { id: 'source', label: `微信消息标识与排版：${enabled(config.messageSourceTag?.enabled !== false)} · 消息加来源标记，回复按微信风格` },

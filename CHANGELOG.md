@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.6.0] - 2026-10-14
+
+### Changed
+- Bidirectional sync now defaults to off: WeChat still receives replies to WeChat-initiated tasks, but desktop input and AI replies are no longer mirrored unless enabled with `/wechat config bidirectional on` or in the settings menu. Existing configs that saved an explicit value keep it.
+  双向同步默认改为关闭：微信任务回复仍回传微信，电脑端输入和 AI 回复不再自动镜像；可通过 `/wechat config bidirectional on` 或设置菜单开启。已保存过显式取值的配置不受影响。
+
 ## [0.5.2] - 2026-10-14
 
 ### Added

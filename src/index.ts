@@ -174,7 +174,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (!client && !running) { latestCtx.ui.setStatus('wechat', ''); return }
     latestCtx.ui.setStatus('wechat', formatWechatStatus({
       running,
-      bidirectional: getConfigCache().bidirectionalSync !== false,
+      bidirectional: getConfigCache().bidirectionalSync === true,
       pending: queue.pending,
       sendFailed: client?.lastSend?.success === false,
     }))
@@ -586,7 +586,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     turn.targetUser = request?.userId ?? (running ? client?.userId ?? null : null)
     updateStatusBar()
     setImmediate(() => void queue.drain())
-    if (!request && running && client && getConfigCache().bidirectionalSync !== false) {
+    if (!request && running && client && getConfigCache().bidirectionalSync === true) {
       const content = event.message.content
       const text = extractTextFromMessageContent(content)
       const imageCount = Array.isArray(content) ? content.filter(part => part.type === 'image').length : 0
@@ -668,7 +668,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       if (!hasSettledEvents(ctx) && event.message.stopReason === 'error') await sendModelFailure('attempt')
       return
     }
-    if (!turn.wechatConversationActive && getConfigCache().bidirectionalSync === false) return
+    if (!turn.wechatConversationActive && getConfigCache().bidirectionalSync !== true) return
 
     const targetUserId = turn.targetUser ?? client.userId
     if (!targetUserId) {
@@ -724,7 +724,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   async function sendModelFailure(mode: FailureNoticeMode, aborted = false): Promise<void> {
     if (!running || !client || !turn.targetUser) return
-    if (!turn.wechatConversationActive && getConfigCache().bidirectionalSync === false) return
+    if (!turn.wechatConversationActive && getConfigCache().bidirectionalSync !== true) return
     const notice = modelFailure.take(mode, aborted)
     if (!notice) return
     try { await client.sendText(turn.targetUser, notice) }

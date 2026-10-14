@@ -6,7 +6,7 @@ Run `/wechat config` to open host-native selection and input dialogs. Each row i
 
 | Location | Setting | Default | Purpose |
 | --- | --- | --- | --- |
-| Common | Bidirectional sync | On | Forward new desktop input and AI replies to WeChat. Off keeps only replies to WeChat requests. |
+| Common | Bidirectional sync | Off | Forward new desktop input and AI replies to WeChat. Off keeps only replies to WeChat requests. |
 | Common | Auto-start WeChat bridge | Off | Attempt to connect WeChat when a pi session opens. In the TUI, a bridge held by another session follows the handoff mode below (ask or auto); headless modes report the lock instead of asking. Enabling it offers to switch the handoff mode to Auto. Does not start/stop the current bridge. |
 | Common | Bridge handoff mode | Ask | When another session holds a cooperative-handoff bridge (0.4.4+), Ask shows the takeover dialog and Auto requests the handoff directly. Headless modes never auto-take-over. |
 | Common | WeChat message tag and formatting | On | One switch for the `[微信]` marker, WeChat-friendly reply formatting, and the local question-tool guard. Waits for an active task to finish before changing. |
@@ -27,7 +27,7 @@ Existing commands remain supported. Additional explicit commands are `/wechat co
 
 | 位置 | 配置项 | 默认值 | 为什么需要 |
 | --- | --- | --- | --- |
-| 常用 | 双向同步 | 开启 | 控制是否同步新的电脑输入和 AI 回复；关闭后仅回传微信任务回复。 |
+| 常用 | 双向同步 | 关闭 | 控制是否同步新的电脑输入和 AI 回复；关闭后仅回传微信任务回复。 |
 | 常用 | 自动启动微信桥接 | 关闭 | 打开 pi 会话时尝试连接微信。TUI 下若桥接被其他会话持有，按下方「持锁接管方式」处理；无界面模式只报告锁占用。开启时会引导把接管方式改为自动。不改变当前桥接启停状态。 |
 | 常用 | 持锁接管方式 | 询问 | 其他会话持有协作交接（0.4.4+）的桥接时，询问 = 弹窗确认，自动 = 直接请求旧会话交接。无界面模式始终不自动接管。 |
 | 常用 | 微信消息标识与排版 | 开启 | 微信消息加来源标记（默认 [微信]），引导 AI 用短段落和文字提问，并拦截已配置的本机提问工具；有任务运行时等待其结束再修改。 |

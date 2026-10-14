@@ -225,7 +225,7 @@ async function cmdStatus(_args: string, ctx: Ctx, deps: CommandDeps): Promise<vo
       : []),
     `上线状态通知: ${describeApiResult(activeClient?.lastLifecycle?.start, 'API 返回成功（不代表客户端已更新）')}`,
     `下线状态通知: ${describeApiResult(activeClient?.lastLifecycle?.stop, 'API 返回成功（不代表客户端已更新）')}`,
-    `双向同步: ${config.bidirectionalSync !== false ? '开启' : '关闭（仅微信任务回复）'}`,
+    `双向同步: ${config.bidirectionalSync === true ? '开启' : '关闭（仅微信任务回复）'}`,
     `账号 ID: ${activeClient?.accountId ?? '-'}`,
     `用户 ID: ${activeClient?.userId ?? '-'}`,
     `排队消息: ${deps.queue.pending}`,
@@ -275,7 +275,7 @@ async function applyConfigCommand(args: string, ctx: ExtensionCommandContext, de
     deps.notify([
       `自动启动: ${config.autoStart ? '已开启' : '已关闭'}`,
       `持锁接管: ${config.handoff === 'auto' ? '自动（直接请求交接）' : '询问（默认）'}`,
-      `双向同步: ${config.bidirectionalSync !== false ? '已开启（默认）' : '已关闭'}`,
+      `双向同步: ${config.bidirectionalSync === true ? '已开启' : '已关闭（默认）'}`,
       `微信 /tools: ${config.allowRemoteTools ? '已开启' : '已关闭（/wechat remotetools on 开启）'}`,
       `微信来源与回复约定: ${config.messageSourceTag?.enabled === false ? '已关闭' : '已开启（默认）'}`,
       `来源标识: ${config.messageSourceTag?.wechatTag?.trim() || WECHAT_SOURCE_TAG}`,

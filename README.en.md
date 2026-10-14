@@ -26,7 +26,7 @@ A WeChat extension for [pi](https://github.com/earendil-works/pi): connect one W
 
 ### Features
 
-- **Two-way sync:** WeChat messages reach pi; new desktop input and AI replies are mirrored by default, without replaying history.
+- **Two-way sync:** WeChat messages reach pi; new desktop input and AI replies can be mirrored (off by default), without replaying history.
 - **Text, images, and files:** supports quoted text and WeChat voice transcripts. Images reach the model; received files are saved under `.pi-wechat-files/` in the project. AI can send project files and images back.
 - **Readable replies:** full URLs, code chunks, text-based questions, and customizable reply rules.
 - **Session handoff:** confirm in the new session (or set the handoff mode to Auto to skip the prompt), then wait for the old bridge to stop before taking over. The old AI task is not cancelled.

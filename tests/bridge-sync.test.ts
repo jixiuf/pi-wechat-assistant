@@ -120,7 +120,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     ctx.ui.select.mockResolvedValueOnce(undefined)
     await command('config')
     expect(ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining('微信设置'), expect.arrayContaining([
-      '双向同步：开启 · 电脑输入和 AI 回复也转发到微信', '自动启动微信桥接：关闭 · 打开 pi 时尝试连接微信', '微信消息标识与排版：开启 · 消息加来源标记，回复按微信风格',
+      '双向同步：关闭 · 电脑输入和 AI 回复也转发到微信', '自动启动微信桥接：关闭 · 打开 pi 时尝试连接微信', '微信消息标识与排版：开启 · 消息加来源标记，回复按微信风格',
     ]))
     expect(registeredTools.size).toBe(0)
     expect(await handlers.before_agent_start({ systemPrompt: 'base', prompt: 'local' }, ctx)).toBeUndefined()
@@ -128,17 +128,17 @@ describe('bridge bidirectional sync and lifecycle', () => {
 
   it('saves a menu choice, preserves advanced fields and redisplays its current value', async () => {
     state.config.messageSourceTag = { wechatTag: '[自定义]', blockedTools: ['ask'] }
-    ctx.ui.select.mockResolvedValueOnce('双向同步：开启 · 电脑输入和 AI 回复也转发到微信').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
+    ctx.ui.select.mockResolvedValueOnce('双向同步：关闭 · 电脑输入和 AI 回复也转发到微信').mockResolvedValueOnce('开启').mockResolvedValueOnce(undefined)
     await command('config')
-    expect(state.config.bidirectionalSync).toBe(false)
+    expect(state.config.bidirectionalSync).toBe(true)
     expect(state.config.messageSourceTag).toEqual({ wechatTag: '[自定义]', blockedTools: ['ask'] })
-    expect(ctx.ui.select.mock.calls[2][1]).toContain('双向同步：关闭 · 电脑输入和 AI 回复也转发到微信')
+    expect(ctx.ui.select.mock.calls[2][1]).toContain('双向同步：开启 · 电脑输入和 AI 回复也转发到微信')
     expect(state.client.notifyStart).not.toHaveBeenCalled()
   })
 
   it('cancels a setting choice without saving', async () => {
     const { saveConfig } = await import('../src/auth.js')
-    ctx.ui.select.mockResolvedValueOnce('双向同步：开启 · 电脑输入和 AI 回复也转发到微信').mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined)
+    ctx.ui.select.mockResolvedValueOnce('双向同步：关闭 · 电脑输入和 AI 回复也转发到微信').mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined)
     await command('config')
     expect(saveConfig).not.toHaveBeenCalled()
   })
@@ -184,10 +184,10 @@ describe('bridge bidirectional sync and lifecycle', () => {
   it('does not change cached configuration when saving fails', async () => {
     const { saveConfig } = await import('../src/auth.js')
     vi.mocked(saveConfig).mockRejectedValueOnce(new Error('disk full'))
-    ctx.ui.select.mockResolvedValueOnce('双向同步：开启 · 电脑输入和 AI 回复也转发到微信').mockResolvedValueOnce('关闭').mockResolvedValueOnce(undefined)
+    ctx.ui.select.mockResolvedValueOnce('双向同步：关闭 · 电脑输入和 AI 回复也转发到微信').mockResolvedValueOnce('开启').mockResolvedValueOnce(undefined)
     await command('config')
     expect(state.config.bidirectionalSync).toBeUndefined()
-    expect(ctx.ui.select.mock.calls[2][1]).toContain('双向同步：开启 · 电脑输入和 AI 回复也转发到微信')
+    expect(ctx.ui.select.mock.calls[2][1]).toContain('双向同步：关闭 · 电脑输入和 AI 回复也转发到微信')
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('配置未保存'), 'error')
   })
 
@@ -694,6 +694,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
   })
 
   it('keeps the footer compact before and after acquiring context or sending successfully', async () => {
+    state.config.bidirectionalSync = true
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⏸]`)
     await command('start')
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶]`)
@@ -709,13 +710,15 @@ describe('bridge bidirectional sync and lifecycle', () => {
 
   it('refreshes the compact sync mode indicator immediately when toggled', async () => {
     await command('start')
-    await command('config bidirectional off')
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ▶]`)
     await command('config bidirectional on')
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ⇄ ▶]`)
+    await command('config bidirectional off')
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', `[微信 ▶]`)
   })
 
   it('shows a queue count only while messages are pending', async () => {
+    state.config.bidirectionalSync = true
     await command('start')
     const pending = vi.spyOn(state.queue, 'pending', 'get').mockReturnValue(3)
     state.client.onStatusChange?.()
@@ -726,6 +729,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
   })
 
   it('surfaces send failure without error details and clears it on the next successful send', async () => {
+    state.config.bidirectionalSync = true
     await command('start')
     state.client.lastSend = { success: false, at: '2026-10-13T10:00:00Z', error: 'network timeout' }
     state.client.onStatusChange?.()
@@ -896,7 +900,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(state.requestHandoff).toHaveBeenCalledTimes(1)
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('微信桥接已启动'), 'info')
     expect(activeTools).toEqual(['read', 'bash', 'send_file_to_wechat', 'send_image_to_wechat'])
-    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', '[微信 ⇄ ▶]')
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith('wechat', '[微信 ▶]')
   })
 
   it('reports a plain error for a live lock without UI', async () => {
@@ -1051,7 +1055,8 @@ describe('bridge bidirectional sync and lifecycle', () => {
     expect(registeredTools.size).toBe(2)
   })
 
-  it('sends TUI input and new assistant replies by default without first inbound activity', async () => {
+  it('sends TUI input and new assistant replies when sync is enabled without first inbound activity', async () => {
+    state.config.bidirectionalSync = true
     await command('start')
     await startRun('run tests')
     await reply('tests passed')
@@ -1066,6 +1071,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
     { text: '', expected: '[电脑端] 发送了 2 张图片' },
     { text: '长'.repeat(1200), expected: '[电脑端] ' + '长'.repeat(1200) + '\n[附带 2 张图片]' },
   ])('mirrors consumed TUI images with text length $text.length', async ({ text, expected }) => {
+    state.config.bidirectionalSync = true
     await command('start')
     await startRun('earlier task')
     state.client.sendText.mockClear()
@@ -1217,6 +1223,7 @@ describe('bridge bidirectional sync and lifecycle', () => {
   })
 
   it('formats only the WeChat sending copy and preserves the assistant message', async () => {
+    state.config.bidirectionalSync = true
     await command('start')
     await startRun('format reply')
     state.client.sendText.mockClear()
