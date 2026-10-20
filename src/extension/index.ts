@@ -631,7 +631,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   /** 持锁但桥未运行时的恢复路径：确保 client 可用再恢复轮询；
    *  client 不可用（凭据缺失/已退出登录）则释放锁，避免「僵尸锁」——
    *  桥停止但心跳持续续约，其他实例永远抢不走、本机也起不来。 */
-  async function resumePollingOrReleaseLock(): Promise<void> {
+  async function resumePollingOrReleaseLock(note?: string): Promise<void> {
     if (running) return
     if (!client) await loadClient()
     if (!client) {
@@ -646,7 +646,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       return
     }
     log(`已获取协调中心锁，启动微信轮询`)
-    await startPolling()
+    await startPolling(note)
   }
 
   function lockHeartbeat(): void {
@@ -761,8 +761,10 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   // --- TUI 命令注册 ---
 
-  const startPolling = async (): Promise<void> => {
+  const startPolling = async (note = '微信桥接已启动 📱'): Promise<void> => {
     try {
+      // client 可能在 reload/凭据变更后未加载：先补加载，避免「持锁但桥起不来」
+      if (!client) await loadClient()
       if (running || !client) {
         // 留痕：静默 no-op 会让「持锁但桥停」的故障难排查（僵尸锁根因之一）
         if (!running && !client) log(`startPolling 跳过：client 未初始化（无凭据或未登录）`)
@@ -778,7 +780,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       await client.notifyStart().catch((error) => {
         log(`notifyStart 失败（不阻断启动）: ${formatError(error)}`)
       })
-      notify('微信桥接已启动 📱', 'info')
+      notify(note, 'info')
       updateStatusBar()
       void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
       // 注意：不在这里通知微信用户。接管通知仅在明确的接管事件（onTakeoverRequest）触发，
@@ -1091,15 +1093,14 @@ export default function wechatAssistant(pi: ExtensionAPI) {
           log(`自动接管尝试失败: ${lockResult.message}`)
           return
         }
-        running = true
-        agentIdle = true
-        pollAbort = new AbortController()
-        // /use 接管路径与 startPolling 一致：必须先恢复游标+已消费集再轮询，
-        // 否则新接管者从空游标把旧实例已处理的消息全部重收一遍
-        if (client) await restoreConsumedState(client)
-        notify(`微信桥接已接管 📱`, 'info')
-        updateStatusBar()
-        void gateway.connect().catch((err) => log(`gateway.connect 异常退出: ${formatError(err)}`))
+        // 必须走统一的启动路径：preflight → 恢复游标/已消费集 → prepareBridge
+        // （resumeSending 重开发送 + 注册微信工具）→ notifyStart → connect。
+        // 早前这里内联复制了一份启动逻辑，漏了 prepareBridge：上一任持锁实例 stopBridge
+        // 时 pauseSending 过的 client 会被本机复用，导致「收得到、发不出」
+        // （报错：微信桥接已停止，发送工具不可用），且微信工具未注册。
+        // resumePollingOrReleaseLock 同时兜住 client 不可用时释放锁，避免僵尸锁。
+        await resumePollingOrReleaseLock('微信桥接已接管 📱')
+        if (!running) return
         // 接管成功后通知微信用户
         void notifyWechatTakeover()
       })()
@@ -1109,14 +1110,8 @@ export default function wechatAssistant(pi: ExtensionAPI) {
     if (config.autoStart && client) {
       const lockResult = await lock()
       if (lockResult.success) {
-        running = true
-        agentIdle = true
-        pollAbort = new AbortController()
-        notify('微信桥接已自动启动 📱', 'info')
-        updateStatusBar()
-        void gateway.connect().catch(err => {
-          log(`gateway.connect 异常退出: ${formatError(err)}`)
-        })
+        // 与接管路径共用同一启动逻辑，避免漏掉 prepareBridge/preflightBridge
+        await resumePollingOrReleaseLock('微信桥接已自动启动 📱')
         // 首次启动不通知微信用户（非接管切换）
       } else {
         log(`自动启动失败: ${lockResult.message}`)

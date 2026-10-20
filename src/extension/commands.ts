@@ -127,12 +127,12 @@ export async function startBridge(_args: string, ctx: Ctx, deps: CommandDeps, _i
   if (deps.isRunning()) { deps.notify('微信桥接已经在运行', 'info'); return }
   const lockResult = await deps.lock()
   if (!lockResult.success) { deps.notify(lockResult.message, 'error'); return }
-  deps.setRunning(true)
-  deps.setPollAbort(new AbortController())
-  deps.notify('微信桥接已启动 📱', 'info')
-  deps.updateStatusBar()
-  // pollMessages(startPolling) 立即返回：轮询由 gateway 内部循环接管，pollAbort 不能在此清理
-  void deps.pollMessages()
+  // 必须交给统一启动路径（startPolling）：preflight → 恢复游标/已消费集 →
+  // prepareBridge（resumeSending 重开发送 + 注册微信工具）→ notifyStart → gateway.connect。
+  // 早前这里先 setRunning(true) 再调 pollMessages（=startPolling），而 startPolling 在
+  // running 已为 true 时直接返回，导致 /wechat start 只是把状态标成运行、实际不轮询、
+  // 不恢复发送（表现为「/wechat start 后仍收不到/发不出」）。
+  await deps.pollMessages()
 }
 
 async function cmdStop(_args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {

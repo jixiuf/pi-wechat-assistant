@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.6.4] - 2026-10-20
+
+### English
+
+- Fix WeChat bridge receiving but never replying after `/use <instance>` takeover: the takeover path duplicated the startup sequence and skipped `prepareBridge()`, so a client paused by the previous holder (`pauseSending()`) was reused with sending still disabled (`微信桥接已停止，发送工具不可用`) and the WeChat send tools were never registered. Takeover and `autoStart` now share the unified start path (preflight, consumed-state restore, `prepareBridge`, `notifyStart`, `connect`).
+- Fix `/wechat start` only marking the bridge as running without polling or re-enabling sending: it preset `running` and then called `startPolling()`, which returns early when `running` is already true.
+- `startPolling()` now loads the client when missing and accepts a status note; the takeover path releases the lock instead of holding a zombie lock when no client is available.
+- Add regression tests for the start path.
+
+### 中文
+
+- 修复 `/use <实例>` 接管后「收得到、发不出」：接管路径内联复制了一份启动逻辑，漏了 `prepareBridge()`，上一任持锁实例 `pauseSending()` 过的 client 被复用且发送始终关闭（报错 `微信桥接已停止，发送工具不可用`），微信发送工具也未注册。接管与 `autoStart` 现在共用统一启动路径（preflight → 恢复已消费状态 → `prepareBridge` → `notifyStart` → `connect`）。
+- 修复 `/wechat start` 只把状态标成运行、实际不轮询也不恢复发送：它先置 `running` 再调用 `startPolling()`，而后者在 `running` 为 true 时直接返回。
+- `startPolling()` 缺 client 时会先补加载，并支持传入状态提示；接管路径在无可用 client 时释放锁，避免僵尸锁。
+- 补充启动路径的回归测试。
+
 ## [0.6.3] - 2026-10-20
 
 ### English
