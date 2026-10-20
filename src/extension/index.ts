@@ -628,6 +628,27 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   // 协调中心连续不可达计数：连续 3 次（3s）才降级本地锁，避免 reload 抖动误判
   let coordUnreachableCount = 0
 
+  /** 持锁但桥未运行时的恢复路径：确保 client 可用再恢复轮询；
+   *  client 不可用（凭据缺失/已退出登录）则释放锁，避免「僵尸锁」——
+   *  桥停止但心跳持续续约，其他实例永远抢不走、本机也起不来。 */
+  async function resumePollingOrReleaseLock(): Promise<void> {
+    if (running) return
+    if (!client) await loadClient()
+    if (!client) {
+      log(`持有微信锁但 client 不可用（无凭据或已退出登录），释放锁避免僵尸锁`)
+      const hub = getHubBridge()
+      const coordUrl = getCoordUrl()
+      if (coordUrl && hub?.releaseRemoteLock) {
+        await hub.releaseRemoteLock(coordUrl, getLockHolderName(), 'wechat').catch(() => {})
+      } else {
+        clearLocalDegradedLock()
+      }
+      return
+    }
+    log(`已获取协调中心锁，启动微信轮询`)
+    await startPolling()
+  }
+
   function lockHeartbeat(): void {
     const hub = getHubBridge()
     const coordUrl = getCoordUrl()
@@ -637,14 +658,13 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       // 客户端模式：
       //  - 协调中心可达：若本机已持有则续约（锁归本机 pid）；否则不抢（协调中心模式实例负责接管）
       //  - 协调中心连续不可达：降级本地锁（唯一存活时接管）
-      void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then((res) => {
+      void hub.requestRemoteLock(coordUrl, holderName, process.pid, 'wechat').then(async (res) => {
         if (res.ok) {
           coordUnreachableCount = 0
           // 远程锁成功（获取或续约）：本机是持锁者，应启动/保持轮询
           clearLocalDegradedLock()
           if (!running) {
-            log(`已获取协调中心锁，启动微信轮询`)
-            startPolling()
+            await resumePollingOrReleaseLock()
           }
           return
         }
@@ -655,7 +675,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
             if (!running) {
               if (hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')) {
                 log(`协调中心持续不可达，降级本地锁接管微信`)
-                startPolling()
+                await resumePollingOrReleaseLock()
               }
             } else {
               hub.coordinatorTryLock?.(holderName, process.pid, 'wechat')
@@ -677,7 +697,7 @@ export default function wechatAssistant(pi: ExtensionAPI) {
       // 协调中心模式：本地锁唯一持有者
       const ok = hub.coordinatorTryLock(holderName, process.pid, 'wechat')
       if (ok) {
-        if (!running) startPolling()
+        if (!running) void resumePollingOrReleaseLock()
       } else if (running) {
         log(`全局锁已被其他实例接管，微信轮询让位`)
         void stopBridge({ releaseLock: false })
@@ -743,7 +763,11 @@ export default function wechatAssistant(pi: ExtensionAPI) {
 
   const startPolling = async (): Promise<void> => {
     try {
-      if (running || !client) return
+      if (running || !client) {
+        // 留痕：静默 no-op 会让「持锁但桥停」的故障难排查（僵尸锁根因之一）
+        if (!running && !client) log(`startPolling 跳过：client 未初始化（无凭据或未登录）`)
+        return
+      }
       await preflightBridge()
       running = true
       agentIdle = true
