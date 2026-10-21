@@ -1120,17 +1120,27 @@ export default function wechatAssistant(pi: ExtensionAPI) {
   })
 
   // Transient model context only: never persist stale stop notices in the session.
+  // Stop notice is injected at most once per stop episode: re-injecting it every
+  // turn spams the conversation (user-visible noise); the send tools' own guards
+  // still return the authoritative error on every actual send attempt.
+  let stopNoticeInjected = false
   pi.on('context', (event) => {
     const messages = event.messages.filter(message =>
       !(message.role === 'custom' && message.customType === WECHAT_TOOL_STATUS_TYPE))
-    if (toolsRegistered && !running) {
-      messages.push({
-        role: 'custom', customType: WECHAT_TOOL_STATUS_TYPE, display: false, timestamp: Date.now(),
-        content: '微信桥接当前已停止，send_file_to_wechat 和 send_image_to_wechat 均不可用。'
-          + '不要依据历史中的工具说明尝试发送，也不要声称已发送；用户执行 /wechat start 后才会恢复。',
-      })
+    const stopped = toolsRegistered && !running
+    if (stopped) {
+      if (!stopNoticeInjected) {
+        messages.push({
+          role: 'custom', customType: WECHAT_TOOL_STATUS_TYPE, display: false, timestamp: Date.now(),
+          content: '微信桥接当前已停止，send_file_to_wechat 和 send_image_to_wechat 均不可用。'
+            + '不要依据历史中的工具说明尝试发送，也不要声称已发送；用户执行 /wechat start 后才会恢复。',
+        })
+        stopNoticeInjected = true
+      }
+    } else {
+      stopNoticeInjected = false
     }
-    if (messages.length !== event.messages.length || (toolsRegistered && !running)) return { messages }
+    if (messages.length !== event.messages.length || stopped) return { messages }
   })
 
   // 用户在 TUI 主动输入非命令内容 → 打断微信对话活跃状态

@@ -3,6 +3,9 @@
 // ============================================================================
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@mariozechner/pi-coding-agent'
+import { existsSync, statSync } from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { debugLog } from '../shared/logger.js'
 import {
   clearCredentials,
@@ -23,6 +26,71 @@ import { cmdConfig, cmdAutostart, cmdRemoteTools, cmdPrompt } from './config-com
 import { loadConfig } from '../bridge/config.js'
 import { resolveImageBatchWaitMs, resolveImageMaxBytes } from '../bridge/config-values.js'
 import { clearContextTokens, clearTransportState } from '../bridge/transport-state.js'
+import { splitAndFilterMarkdown } from '../messaging/message.js'
+import { stoppedBridgeReason } from './send-tools.js'
+
+const MAX_COMMAND_FILE_BYTES = 50 * 1024 * 1024
+
+function resolveSendPath(raw: string, cwd: string): string {
+  let p = raw
+  if (p === '~') p = os.homedir()
+  else if (p.startsWith('~/')) p = path.join(os.homedir(), p.slice(2))
+  return path.isAbsolute(p) ? p : path.join(cwd, p)
+}
+
+async function bridgeUnavailableHint(deps: CommandDeps): Promise<string> {
+  const base = await stoppedBridgeReason()
+  return base + '\n若其他实例已接管微信桥，可在该实例上执行 /cmd <实例> /wechat send|image ... 代发。'
+}
+
+/** /wechat send <文本>：直接把文本发到微信（桥停止时报错并提示） */
+async function cmdSend(args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
+  deps.setLatestCtx(ctx)
+  const text = args.trim()
+  if (!text) { deps.notify('用法: /wechat send <文本>', 'warning'); return }
+  const client = deps.getClient()
+  if (!deps.isRunning() || !client) { deps.notify(await bridgeUnavailableHint(deps), 'warning'); return }
+  try {
+    const chunks = splitAndFilterMarkdown(text)
+    for (const chunk of chunks) {
+      if (!deps.isRunning() || !deps.getClient()) throw new Error('发送中途桥接已停止')
+      await client.sendText(client.userId, chunk)
+    }
+    deps.notify(`✅ 已发送到微信（${chunks.length} 条）`, 'info')
+  } catch (error) {
+    debugLog(`/wechat send 失败: ${formatError(error)}`)
+    deps.notify(`发送失败: ${formatError(error)}`, 'error')
+  }
+}
+
+/** /wechat image <路径>：把图片发到微信（显式命令允许绝对路径与 ~，限 50MB） */
+async function cmdImage(args: string, ctx: Ctx, deps: CommandDeps): Promise<void> {
+  deps.setLatestCtx(ctx)
+  const raw = args.trim()
+  if (!raw) { deps.notify('用法: /wechat image <图片路径>', 'warning'); return }
+  const client = deps.getClient()
+  if (!deps.isRunning() || !client) { deps.notify(await bridgeUnavailableHint(deps), 'warning'); return }
+  const resolved = resolveSendPath(raw, ctx.cwd)
+  if (!existsSync(resolved)) { deps.notify(`文件不存在: ${resolved}`, 'error'); return }
+  let size = 0
+  try {
+    size = statSync(resolved).size
+  } catch {
+    deps.notify(`无法读取文件: ${resolved}`, 'error')
+    return
+  }
+  if (size > MAX_COMMAND_FILE_BYTES) {
+    deps.notify(`文件过大 (${(size / 1024 / 1024).toFixed(1)}MB)，上限 50MB`, 'error')
+    return
+  }
+  try {
+    await client.sendImage(client.userId, resolved)
+    deps.notify(`✅ 图片 (${(size / 1024).toFixed(1)} KB) 已发送到微信`, 'info')
+  } catch (error) {
+    debugLog(`/wechat image 失败: ${formatError(error)}`)
+    deps.notify(`发送失败: ${formatError(error)}`, 'error')
+  }
+}
 
 type Ctx = ExtensionContext | ExtensionCommandContext
 
@@ -206,6 +274,8 @@ export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
         '/wechat login --force     强制重新扫码',
         '/wechat start             启动桥接',
         '/wechat stop              停止桥接',
+        '/wechat send <文本>       发送文本到微信',
+        '/wechat image <路径>      发送图片到微信（支持绝对路径/~/相对路径）',
         '/wechat status            查看状态',
         '/wechat prompt show       查看微信回复模板',
         '/wechat prompt init       创建用户模板（不覆盖已有文件）',
@@ -220,6 +290,8 @@ export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
         case 'login': return cmdLogin(restArgs, ctx, deps)
         case 'start': return startBridge(restArgs, ctx, deps)
         case 'stop': return cmdStop(restArgs, ctx, deps)
+        case 'send': return cmdSend(restArgs, ctx, deps)
+        case 'image': return cmdImage(restArgs, ctx, deps)
         case 'status': return cmdStatus(restArgs, ctx, deps)
         case 'prompt': return cmdPrompt(restArgs, ctx, deps)
         case 'config': return cmdConfig(args.trim().slice(sub.length).trim(), ctx, deps)
